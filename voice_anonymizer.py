@@ -189,7 +189,15 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
         COLOR_OFF = "#B0B0B0"
 
         def __init__(self, parent, initial=True, command=None, **kwargs):
-            bg = kwargs.pop("bg", parent.cget("background"))
+            bg = kwargs.pop("bg", None)
+            if bg is None:
+                # I widget ttk non espongono "background" via cget come i
+                # widget tk classici: il colore va letto dallo stile ttk,
+                # altrimenti si usa un grigio chiaro di fallback.
+                try:
+                    bg = ttk.Style().lookup("TFrame", "background") or "#F0F0F0"
+                except tk.TclError:
+                    bg = "#F0F0F0"
             super().__init__(
                 parent, width=self.WIDTH, height=self.HEIGHT,
                 highlightthickness=0, bg=bg, **kwargs
