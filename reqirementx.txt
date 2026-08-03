@@ -1,0 +1,5 @@
+cffi==2.1.0
+numpy==2.2.6
+pedalboard==0.9.24
+pycparser==3.0
+sounddevice==0.5.5

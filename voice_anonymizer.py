@@ -101,13 +101,81 @@ class VoiceAnonymizer:
 
 
 def list_devices():
-    print("\n--- Dispositivi di INPUT disponibili ---")
+    print("\n--- Dispositivi di INPUT disponibili (pedalboard) ---")
     for name in AudioStream.input_device_names:
         print(f"  {name}")
-    print("\n--- Dispositivi di OUTPUT disponibili ---")
+    print("\n--- Dispositivi di OUTPUT disponibili (pedalboard) ---")
     for name in AudioStream.output_device_names:
         print(f"  {name}")
     print()
+
+
+def diagnose_devices():
+    """
+    Diagnostica dettagliata: pedalboard mostra un elenco 'semplificato'
+    dei dispositivi audio (un nome per input, uno per output). Se un
+    dispositivo (es. un headset USB/Bluetooth come il Jabra) non compare
+    dove ti aspetti, questa funzione usa la libreria 'sounddevice' per
+    interrogare PortAudio a basso livello e mostrare TUTTI i dispositivi
+    con il numero di canali di input/output e l'host API associato.
+    Questo aiuta a capire il nome esatto da usare e se il sistema
+    operativo sta davvero esponendo il microfono del dispositivo.
+
+    Richiede: pip install sounddevice
+    """
+    print("\n=== Elenco 'semplificato' secondo pedalboard ===")
+    list_devices()
+
+    try:
+        import sounddevice as sd
+    except ImportError:
+        print(
+            "Per la diagnostica completa installa 'sounddevice':\n"
+            "    pip install sounddevice\n"
+            "poi rilancia: python voice_anonymizer.py --diagnose\n"
+        )
+        return
+
+    print("=== Elenco dettagliato secondo sounddevice/PortAudio ===")
+    print("(cerca il tuo dispositivo Jabra e controlla la colonna 'in_ch':")
+    print(" se e' 0, il sistema operativo non lo espone come microfono)\n")
+
+    try:
+        hostapis = sd.query_hostapis()
+    except Exception as exc:
+        print(f"Impossibile interrogare le host API: {exc}")
+        hostapis = []
+
+    devices = sd.query_devices()
+    header = f"{'idx':<4} {'in_ch':<6} {'out_ch':<7} {'hostapi':<20} nome"
+    print(header)
+    print("-" * len(header))
+    for idx, dev in enumerate(devices):
+        hostapi_name = ""
+        try:
+            hostapi_name = hostapis[dev["hostapi"]]["name"]
+        except Exception:
+            pass
+        print(
+            f"{idx:<4} {dev['max_input_channels']:<6} "
+            f"{dev['max_output_channels']:<7} {hostapi_name:<20} {dev['name']}"
+        )
+
+    print(
+        "\nSuggerimenti se il Jabra non appare con in_ch > 0 in NESSUNA riga:\n"
+        "  - Windows: Impostazioni > Sistema > Suono > Ingresso: verifica che\n"
+        "    il microfono Jabra sia elencato, abilitato e non disattivato da\n"
+        "    un'altra app che lo tiene in uso esclusivo.\n"
+        "  - Ubuntu: esegui 'pactl list sources short' oppure apri 'pavucontrol'\n"
+        "    (scheda Input Devices) per verificare che la sorgente mic esista.\n"
+        "  - Se il Jabra e' via Bluetooth, alcuni profili (es. A2DP) offrono\n"
+        "    solo l'uscita audio in alta qualita' e NON il microfono: serve\n"
+        "    passare al profilo 'Headset/HFP' (spesso qualita' audio minore)\n"
+        "    per avere sia input che output microfono disponibili.\n"
+        "  - Se invece appare con un nome DIVERSO da quello che ti aspetti\n"
+        "    (es. 'Microfono (Jabra Evolve 65)' invece di 'Jabra Evolve 65'),\n"
+        "    usa esattamente quel nome nel campo --input o nel menu della GUI.\n"
+    )
 
 
 # =============================================================================
@@ -376,6 +444,8 @@ def main():
                          help="Avvia l'interfaccia grafica (default se non specifichi --input/--output)")
     parser.add_argument("--list-devices", action="store_true",
                          help="Elenca i dispositivi audio disponibili ed esce")
+    parser.add_argument("--diagnose", action="store_true",
+                         help="Diagnostica dettagliata dei dispositivi audio (utile se un dispositivo non compare come input/output) ed esce")
     parser.add_argument("--input", type=str,
                          help="Nome del dispositivo di INPUT (il tuo microfono reale) — modalita' CLI")
     parser.add_argument("--output", type=str,
@@ -391,6 +461,10 @@ def main():
     parser.add_argument("--start-disabled", action="store_true",
                          help="Avvia con l'alterazione disattivata (bypass) — modalita' CLI")
     args = parser.parse_args()
+
+    if args.diagnose:
+        diagnose_devices()
+        sys.exit(0)
 
     if args.list_devices:
         list_devices()

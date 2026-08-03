@@ -79,6 +79,7 @@ Lo stato corrente (stream avviato/fermato, alterazione attiva/disattiva)
 | Argomento | Default | Descrizione |
 |---|---|---|
 | `--gui` | — | Forza l'apertura dell'interfaccia grafica |
+| `--diagnose` | — | Diagnostica dettagliata dei dispositivi audio ed esce (vedi [Risoluzione problemi](#risoluzione-problemi)) |
 | `--semitones` | `-4.0` | Pitch-shift in semitoni. Negativo = voce più grave, positivo = più acuta |
 | `--chorus-mix` | `0.2` | Intensità del chorus (0.0–1.0), aggiunge variazione timbrica |
 | `--samplerate` | `48000` | Frequenza di campionamento (solo modalità CLI) |
@@ -221,6 +222,60 @@ deactivate
 source venv/bin/activate      # Linux, oppure .\venv\Scripts\Activate.ps1 su Windows
 python voice_anonymizer.py
 ```
+
+## Risoluzione problemi
+
+### Un dispositivo (es. cuffie Jabra) non compare come microfono di input
+
+Alcuni headset USB o Bluetooth vengono riconosciuti dal sistema solo
+come dispositivo di **output** e non come **input**, anche se hanno un
+microfono integrato. Prima di tutto lancia la diagnostica dettagliata:
+
+```bash
+pip install sounddevice
+python voice_anonymizer.py --diagnose
+```
+
+Questo comando mostra una tabella con **tutti** i dispositivi audio
+visti dal sistema, il numero di canali di input/output di ciascuno e
+l'host API associata (WASAPI, MME, PulseAudio, ecc.), utile per capire
+se il microfono è davvero disponibile e con quale nome esatto.
+
+Le cause più comuni:
+
+- **Bluetooth in profilo A2DP invece di HFP/HSP**: il profilo A2DP dà
+  solo audio in uscita di alta qualità, *senza* microfono. Per avere
+  l'input serve passare al profilo Headset/Handsfree (qualità audio in
+  uscita inferiore, ma con microfono disponibile).
+  - *Ubuntu*: apri `pavucontrol` → scheda **Configuration** → seleziona
+    il profilo "Headset Head Unit (HSP/HFP)" per il dispositivo.
+  - *Windows*: di solito il profilo cambia automaticamente quando
+    un'app richiede il microfono; se non succede, verificalo in
+    **Impostazioni → Bluetooth e dispositivi → [il tuo Jabra] → altre
+    opzioni**, oppure disabilita/riabilita il dispositivo.
+
+- **Nome diverso tra output e input**: spesso il sistema espone due
+  voci distinte per lo stesso headset, es. `Jabra Evolve 65` (altoparlante)
+  e `Microfono (Jabra Evolve 65)` o `Jabra Evolve 65 Mono` (microfono).
+  Controlla l'elenco input nella GUI/CLI: il microfono potrebbe esserci
+  con un nome leggermente diverso da quello che ti aspetti.
+
+- **Dispositivo occupato in esclusiva** da un'altra applicazione (anche
+  Teams stesso, se già aperto): chiudi le altre app che potrebbero
+  tenere il microfono impegnato e riprova.
+
+- **Verifica a livello di sistema operativo**, indipendentemente dallo
+  script:
+  - *Windows*: **Impostazioni → Sistema → Suono → Ingresso**, controlla
+    che il microfono Jabra sia elencato, abilitato e non disattivato.
+  - *Ubuntu*: `pactl list sources short` oppure `pavucontrol` (scheda
+    **Input Devices**), per verificare che la sorgente microfono esista
+    a livello di sistema prima ancora di provare con lo script.
+
+Se dopo questi controlli il dispositivo continua a non comparire come
+input, prova a selezionarlo comunque con il nome esatto trovato tramite
+`--diagnose` (colonna `nome`, con `in_ch` maggiore di 0), passandolo
+manualmente con `--input "nome esatto"` da riga di comando.
 
 ## Licenza
 
