@@ -15,18 +15,32 @@ Funziona su **Windows** e **Ubuntu/Linux**.
 ## Requisiti
 
 - Python 3.10+
-- [pedalboard](https://github.com/spotify/pedalboard) (gestisce l'I/O
-  audio in tempo reale e gli effetti DSP)
+- [pedalboard](https://github.com/spotify/pedalboard) (catena di effetti
+  DSP: pitch-shift, filtri, chorus)
+- [sounddevice](https://python-sounddevice.readthedocs.io/) (I/O audio
+  in tempo reale, basato su PortAudio)
+- `numpy`
 - `tkinter` per l'interfaccia grafica (incluso nella maggior parte delle
   installazioni Python; su Ubuntu potrebbe servire installarlo a parte)
 - Un dispositivo audio virtuale (vedi sezione [Setup](#setup-del-microfono-virtuale))
 
 ```bash
-pip install pedalboard
+pip install pedalboard sounddevice numpy
 
 # Solo su Ubuntu/Debian, se tkinter non è già presente:
 sudo apt install python3-tk
 ```
+
+> **Nota tecnica**: lo script usa `sounddevice` per aprire i flussi
+> audio di input/output e `pedalboard` solo per applicare gli effetti
+> ad ogni blocco audio. In una versione precedente usavamo
+> `pedalboard.io.AudioStream` anche per l'I/O, ma quell'API ha un bug
+> noto su Windows che a volte confonde i driver WASAPI/DirectSound,
+> facendo sparire o duplicare alcuni dispositivi (in particolare
+> headset USB/Bluetooth) — vedi
+> [spotify/pedalboard#274](https://github.com/spotify/pedalboard/issues/274).
+> `sounddevice` si è dimostrato più affidabile nell'enumerazione dei
+> dispositivi.
 
 ## Uso — Interfaccia grafica (consigliata)
 
@@ -59,10 +73,14 @@ Lo stato corrente (stream avviato/fermato, alterazione attiva/disattiva)
    ```
 
 2. Avvia lo script indicando il tuo microfono reale come input e il
-   dispositivo virtuale come output:
+   dispositivo virtuale come output (puoi usare il nome completo, un
+   nome parziale case-insensitive, oppure l'indice numerico mostrato
+   da `--list-devices`):
 
    ```bash
-   python voice_anonymizer.py --input "NOME_MICROFONO_REALE" --output "NOME_DISPOSITIVO_VIRTUALE"
+   python voice_anonymizer.py --input "Jabra" --output "CABLE Input"
+   # oppure con gli indici numerici
+   python voice_anonymizer.py --input 3 --output 7
    ```
 
 3. In Teams, imposta il microfono sul dispositivo virtuale (vedi sotto).
@@ -180,7 +198,7 @@ all'ambiente virtuale e non a quello di sistema.
 Con l'ambiente virtuale attivo:
 
 ```bash
-pip install pedalboard
+pip install pedalboard sounddevice numpy
 ```
 
 Su Ubuntu, se serve anche `tkinter` per la GUI e non è già presente,
@@ -196,6 +214,8 @@ Per rendere il progetto facilmente riproducibile, crea un file
 `requirements.txt` nella cartella del progetto:
 ```
 pedalboard>=0.9
+sounddevice>=0.4
+numpy
 ```
 
 e installa tutto con un solo comando:
@@ -227,21 +247,30 @@ python voice_anonymizer.py
 
 ### Un dispositivo (es. cuffie Jabra) non compare come microfono di input
 
-Alcuni headset USB o Bluetooth vengono riconosciuti dal sistema solo
-come dispositivo di **output** e non come **input**, anche se hanno un
-microfono integrato. Prima di tutto lancia la diagnostica dettagliata:
+**Aggiornamento**: dalla versione attuale lo script usa `sounddevice`
+per l'intera gestione dei dispositivi audio (non solo per la
+diagnostica), proprio perché più affidabile di `pedalboard.io.AudioStream`
+su Windows con dispositivi USB/Bluetooth (vedi nota nella sezione
+[Requisiti](#requisiti)). Se il tuo Jabra risultava visibile solo come
+output con la versione precedente dello script, ora dovrebbe comparire
+correttamente anche come input.
+
+Se un dispositivo continua a non comparire come input, lancia comunque
+la diagnostica:
 
 ```bash
-pip install sounddevice
 python voice_anonymizer.py --diagnose
 ```
 
 Questo comando mostra una tabella con **tutti** i dispositivi audio
 visti dal sistema, il numero di canali di input/output di ciascuno e
 l'host API associata (WASAPI, MME, PulseAudio, ecc.), utile per capire
-se il microfono è davvero disponibile e con quale nome esatto.
+se il microfono è davvero disponibile, con quale nome esatto e sotto
+quale host API (preferisci sempre la riga con hostapi "Windows WASAPI"
+per dispositivi USB/Bluetooth, se presente).
 
-Le cause più comuni:
+Le cause più comuni se il dispositivo non risulta disponibile **a
+nessun livello**:
 
 - **Bluetooth in profilo A2DP invece di HFP/HSP**: il profilo A2DP dà
   solo audio in uscita di alta qualità, *senza* microfono. Per avere
@@ -251,14 +280,8 @@ Le cause più comuni:
     il profilo "Headset Head Unit (HSP/HFP)" per il dispositivo.
   - *Windows*: di solito il profilo cambia automaticamente quando
     un'app richiede il microfono; se non succede, verificalo in
-    **Impostazioni → Bluetooth e dispositivi → [il tuo Jabra] → altre
-    opzioni**, oppure disabilita/riabilita il dispositivo.
-
-- **Nome diverso tra output e input**: spesso il sistema espone due
-  voci distinte per lo stesso headset, es. `Jabra Evolve 65` (altoparlante)
-  e `Microfono (Jabra Evolve 65)` o `Jabra Evolve 65 Mono` (microfono).
-  Controlla l'elenco input nella GUI/CLI: il microfono potrebbe esserci
-  con un nome leggermente diverso da quello che ti aspetti.
+    **Impostazioni → Bluetooth e dispositivi → [il tuo dispositivo] →
+    altre opzioni**, oppure disabilita/riabilita il dispositivo.
 
 - **Dispositivo occupato in esclusiva** da un'altra applicazione (anche
   Teams stesso, se già aperto): chiudi le altre app che potrebbero
@@ -267,15 +290,10 @@ Le cause più comuni:
 - **Verifica a livello di sistema operativo**, indipendentemente dallo
   script:
   - *Windows*: **Impostazioni → Sistema → Suono → Ingresso**, controlla
-    che il microfono Jabra sia elencato, abilitato e non disattivato.
+    che il microfono sia elencato, abilitato e non disattivato.
   - *Ubuntu*: `pactl list sources short` oppure `pavucontrol` (scheda
     **Input Devices**), per verificare che la sorgente microfono esista
     a livello di sistema prima ancora di provare con lo script.
-
-Se dopo questi controlli il dispositivo continua a non comparire come
-input, prova a selezionarlo comunque con il nome esatto trovato tramite
-`--diagnose` (colonna `nome`, con `in_ch` maggiore di 0), passandolo
-manualmente con `--input "nome esatto"` da riga di comando.
 
 ## Licenza
 
