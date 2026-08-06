@@ -12,17 +12,38 @@ Teams: legge l'audio dal tuo microfono reale, lo altera e lo scrive
 su un MICROFONO VIRTUALE, che poi selezioni come input in Teams.
 Vedi le istruzioni di setup nel README.
 
-Motore audio: 'sounddevice' (basato su PortAudio) per l'I/O audio, e
-'pedalboard' solo per la catena di effetti DSP (pitch-shift, filtri,
-chorus). NOTA: le versioni precedenti di questo script usavano
-pedalboard.io.AudioStream anche per l'I/O, ma quella API ha un bug
-noto su Windows che a volte confonde i driver WASAPI/DirectSound e fa
-sparire o duplicare dispositivi (vedi github.com/spotify/pedalboard,
-issue #274). sounddevice si e' dimostrato piu' affidabile per
-l'enumerazione dei dispositivi.
+Pipeline di anonimizzazione (quando attiva):
+
+  Microfono reale
+      |
+      v
+  [Stadio 1 — WORLD vocoder]   (pyworld, se disponibile)
+    - Decomposizione F0 / inviluppo spettrale / aperiodicita'
+    - Pitch shift moderato
+    - Warp dei formanti (vocal tract scaling)
+    - Tilt spettrale leggero (opzionale)
+    - Micro time-stretch per-sessione (opzionale)
+    - Randomizzazione per-sessione: ogni avvio usa parametri
+      leggermente diversi, cosi' le registrazioni non condividono
+      la stessa voce trasformata
+      |
+      v
+  [Stadio 2 — Pedalboard]
+    - HighpassFilter(150 Hz)
+    - LowpassFilter(6000 Hz)
+    - Compressor  (consistenza di livello)
+    - Chorus leggero (variazioni timbriche)
+    - Gain(-1 dB)
+    Nota: PitchShift e' rimosso perche' gia' gestito da WORLD.
+      |
+      v
+  Microfono virtuale (VB-CABLE / null-sink)
+
+Se pyworld non e' installato, lo script cade automaticamente in
+modalita' legacy (solo Pedalboard con PitchShift), con un avviso.
 
 Dipendenze Python:
-    pip install pedalboard sounddevice numpy
+    pip install pedalboard sounddevice numpy pyworld
     (tkinter e' incluso nella maggior parte delle installazioni Python;
      su Ubuntu potrebbe servire: sudo apt install python3-tk)
 
@@ -41,13 +62,13 @@ Due modalita' d'uso:
         t  + invio   -> attiva/disattiva l'alterazione
         q  + invio   -> esce dal programma
 
-Diagnostica dispositivi (utile se un dispositivo non viene riconosciuto
-correttamente come input o output):
+Diagnostica dispositivi:
     python voice_anonymizer.py --diagnose
 """
 
 import argparse
 import os
+import random
 import sys
 import threading
 import time
@@ -60,9 +81,259 @@ from pedalboard import (
     PitchShift,
     HighpassFilter,
     LowpassFilter,
+    Compressor,
     Chorus,
     Gain,
 )
+
+# Prova a importare pyworld; se non disponibile usa la modalita' legacy
+try:
+    import pyworld as pw
+    _PYWORLD_AVAILABLE = True
+except ImportError:
+    _PYWORLD_AVAILABLE = False
+    print(
+        "[AVVISO] pyworld non trovato: lo stadio WORLD e' disabilitato.\n"
+        "         Installa con:  pip install pyworld\n"
+        "         Lo script usa la modalita' legacy (solo Pedalboard).\n",
+        file=sys.stderr,
+    )
+
+# Soglia RMS sotto la quale un blocco e' considerato silenzio e viene
+# passato direttamente a Pedalboard senza elaborazione WORLD.
+# Evita che pw.dio / cheaptrick esplodano su segnali near-zero.
+_SILENCE_RMS_THRESHOLD = 1e-4
+
+# Numero minimo di campioni richiesti da pw.dio (legato al frame_period
+# di default di 5 ms). A 48 kHz, 5 ms = 240 campioni; usiamo un margine
+# generoso di 3x per robustezza.
+_WORLD_MIN_SAMPLES = 720
+
+
+# =============================================================================
+# CONFIGURAZIONE PRIVACY VOCALE
+# =============================================================================
+
+class VoicePrivacyConfig:
+    """
+    Parametri per lo stadio WORLD.
+
+    Se randomize=True, all'avvio viene generata una variante casuale
+    all'interno delle finestre di variazione specificate, cosi' ogni
+    sessione produce una voce trasformata leggermente diversa (piu'
+    difficile da confrontare tra registrazioni).
+    """
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        # Pitch shift base in semitoni (negativo = piu' grave)
+        pitch_shift: float = -2.5,
+        # Warp dei formanti: 1.0 = nessun cambiamento,
+        #   >1.0 = tratto vocale piu' corto (voce piu' acuta/infantile),
+        #   <1.0 = tratto vocale piu' lungo (voce piu' grave/adulta)
+        formant_scale: float = 1.10,
+        # Randomizzazione per-sessione
+        randomize: bool = True,
+        pitch_variation: float = 0.3,      # semitoni +/-
+        formant_variation: float = 0.03,   # scala +/-
+        # Tilt spettrale in dB/octave (+1 = piu' luminoso, -1 = piu' scuro)
+        spectral_tilt: float = 0.0,
+        spectral_tilt_variation: float = 1.0,
+        # Micro time-stretch (1.0 = nessun cambiamento; es. 0.98 o 1.03)
+        time_scale: float = 1.0,
+        time_scale_variation: float = 0.0,
+        # Noise floor in dBFS per disturbare feature spettrali stabili
+        # None = disabilitato
+        noise_floor_dbfs: float | None = -55.0,
+    ):
+        self.enabled = enabled
+        self.pitch_shift = pitch_shift
+        self.formant_scale = formant_scale
+        self.randomize = randomize
+        self.pitch_variation = pitch_variation
+        self.formant_variation = formant_variation
+        self.spectral_tilt = spectral_tilt
+        self.spectral_tilt_variation = spectral_tilt_variation
+        self.time_scale = time_scale
+        self.time_scale_variation = time_scale_variation
+        self.noise_floor_dbfs = noise_floor_dbfs
+
+    def resolve(self) -> "VoicePrivacyConfig":
+        """
+        Ritorna una copia con i parametri effettivi per questa sessione,
+        applicando la randomizzazione se abilitata.
+        """
+        cfg = VoicePrivacyConfig(
+            enabled=self.enabled,
+            pitch_shift=self.pitch_shift,
+            formant_scale=self.formant_scale,
+            randomize=False,
+            spectral_tilt=self.spectral_tilt,
+            time_scale=self.time_scale,
+            noise_floor_dbfs=self.noise_floor_dbfs,
+        )
+        if self.randomize:
+            cfg.pitch_shift += random.uniform(
+                -self.pitch_variation, self.pitch_variation
+            )
+            cfg.formant_scale += random.uniform(
+                -self.formant_variation, self.formant_variation
+            )
+            cfg.spectral_tilt += random.uniform(
+                -self.spectral_tilt_variation, self.spectral_tilt_variation
+            )
+            if self.time_scale_variation > 0:
+                cfg.time_scale += random.uniform(
+                    -self.time_scale_variation, self.time_scale_variation
+                )
+        return cfg
+
+
+# =============================================================================
+# STADIO WORLD (pyworld)
+# =============================================================================
+
+def _semitones_to_ratio(semitones: float) -> float:
+    return 2.0 ** (semitones / 12.0)
+
+
+def _apply_spectral_tilt(sp: np.ndarray, tilt_db_per_oct: float, sr: int) -> np.ndarray:
+    """
+    Applica un tilt spettrale lineare (in dB/ottava) all'inviluppo spettrale.
+    Positivo = enfatizza le alte frequenze; negativo = enfatizza le basse.
+    """
+    if tilt_db_per_oct == 0.0:
+        return sp
+    n_bins = sp.shape[1]
+    freqs = np.linspace(0, sr / 2, n_bins)
+    freqs[0] = 1.0  # evita log2(0)
+    ref_freq = 1000.0
+    gains = 10.0 ** (tilt_db_per_oct * np.log2(freqs / ref_freq) / 20.0)
+    # Clip gains per evitare amplificazioni/attenuazioni estreme
+    gains = np.clip(gains, 0.1, 10.0)
+    return sp * gains[np.newaxis, :]
+
+
+def _sanitize_spectrum(sp: np.ndarray) -> np.ndarray:
+    """
+    Sostituisce NaN/Inf nell'inviluppo spettrale con valori minimi sicuri.
+    WORLD a volte produce NaN su frame di silenzio o segnali molto brevi.
+    """
+    if not np.isfinite(sp).all():
+        sp = np.where(np.isfinite(sp), sp, 1e-16)
+    # L'inviluppo deve essere strettamente positivo (cheaptrick lo garantisce
+    # normalmente, ma dopo il warp dei formanti potremmo avere zeri esatti)
+    return np.maximum(sp, 1e-16)
+
+
+def world_process(
+    audio: np.ndarray,
+    sr: int,
+    cfg: "VoicePrivacyConfig",
+) -> np.ndarray:
+    """
+    Applica lo stadio WORLD al blocco audio mono float32.
+
+    Garanzie di stabilita':
+    - Se il blocco e' troppo corto o in silenzio, viene restituito invariato.
+    - NaN/Inf nell'inviluppo spettrale vengono sanificati prima della risintesi.
+    - L'output e' sempre riportato alla lunghezza esatta dell'ingresso.
+    - Il segnale in uscita e' soft-clippato a ±1.0 prima di essere restituito.
+
+    Passi:
+    1. Decomposizione F0 / spettro / aperiodicita'
+    2. Pitch shift (modifica F0)
+    3. Warp formanti (vocal tract length scaling dell'inviluppo)
+    4. Tilt spettrale
+    5. Sanificazione NaN/Inf
+    6. Risintesi
+    7. Micro time-stretch (ricampionamento leggero)
+    8. Restituzione alla lunghezza originale (pad/trim)
+    9. Noise floor (iniezione rumore sagomato)
+    10. Soft clip a ±1.0
+    """
+    orig_len = len(audio)
+
+    # --- Guardia silenzio / blocco troppo corto ---
+    # Entrambe le condizioni farebbero comportare male pw.dio / cheaptrick.
+    if orig_len < _WORLD_MIN_SAMPLES:
+        return audio
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    if rms < _SILENCE_RMS_THRESHOLD:
+        return audio
+
+    # pyworld opera su float64 mono
+    x = audio.astype(np.float64)
+
+    # --- Decomposizione ---
+    _f0, t = pw.dio(x, sr)
+    f0 = pw.stonemask(x, _f0, t, sr)
+    sp = pw.cheaptrick(x, f0, t, sr)
+    ap = pw.d4c(x, f0, t, sr)
+
+    # --- Sanificazione post-decomposizione ---
+    # Se cheaptrick o d4c restituiscono NaN/Inf (es. su frame quasi-silenziosi
+    # nel mezzo del blocco), li sostituiamo prima di modificare e risintetizzare.
+    sp = _sanitize_spectrum(sp)
+    ap = np.clip(ap, 0.0, 1.0)          # aperiodicita' deve stare in [0,1]
+
+    # --- Pitch shift: scala F0 dove e' voicata ---
+    pitch_ratio = _semitones_to_ratio(cfg.pitch_shift)
+    f0_shifted = np.where(f0 > 0, f0 * pitch_ratio, 0.0)
+
+    # --- Warp formanti (vocal tract length scaling) ---
+    # Per ogni bin di destinazione, calcola il bin sorgente e interpola.
+    n_bins = sp.shape[1]
+    scale = max(cfg.formant_scale, 0.5)   # evita scale degeneri
+    src_idx = np.clip(
+        np.arange(n_bins, dtype=np.float64) / scale, 0.0, n_bins - 1.0
+    )
+    bin_axis = np.arange(n_bins, dtype=np.float64)
+    sp_warped = np.empty_like(sp)
+    for i in range(sp.shape[0]):
+        sp_warped[i] = np.interp(src_idx, bin_axis, sp[i])
+
+    # --- Tilt spettrale ---
+    sp_tilted = _apply_spectral_tilt(sp_warped, cfg.spectral_tilt, sr)
+
+    # --- Sanificazione post-trasformazione ---
+    sp_tilted = _sanitize_spectrum(sp_tilted)
+
+    # --- Risintesi ---
+    synthesized = pw.synthesize(f0_shifted, sp_tilted, ap, sr)
+    synthesized = synthesized.astype(np.float32)
+
+    # --- Micro time-stretch ---
+    # Ricampionamento lineare; il risultato viene sempre riportato
+    # alla lunghezza orig_len per non rompere il buffer di sounddevice.
+    if abs(cfg.time_scale - 1.0) > 1e-4 and len(synthesized) > 0:
+        stretched_len = max(1, int(round(len(synthesized) * cfg.time_scale)))
+        x_src = np.linspace(0.0, 1.0, len(synthesized))
+        x_dst = np.linspace(0.0, 1.0, stretched_len)
+        synthesized = np.interp(x_dst, x_src, synthesized).astype(np.float32)
+
+    # --- Restituzione alla lunghezza esatta dell'ingresso ---
+    # pw.synthesize puo' produrre un output leggermente piu' corto/lungo
+    # (dipende dall'allineamento dei frame interni di WORLD); lo correggiamo
+    # sempre, indipendentemente dal time-stretch.
+    if len(synthesized) >= orig_len:
+        synthesized = synthesized[:orig_len]
+    else:
+        synthesized = np.pad(synthesized, (0, orig_len - len(synthesized)))
+
+    # --- Noise floor ---
+    if cfg.noise_floor_dbfs is not None:
+        noise_amp = float(10.0 ** (cfg.noise_floor_dbfs / 20.0))
+        noise = (np.random.randn(orig_len) * noise_amp).astype(np.float32)
+        synthesized = synthesized + noise
+
+    # --- Soft clip a ±1.0 ---
+    # La risintesi WORLD puo' amplificare il segnale; clippiamo con tanh
+    # per evitare overflow nel downstream Pedalboard / nel buffer sounddevice.
+    synthesized = np.tanh(synthesized)
+
+    return synthesized
 
 
 # =============================================================================
@@ -70,42 +341,91 @@ from pedalboard import (
 # =============================================================================
 
 class VoiceAnonymizer:
-    """Incapsula la catena di effetti pedalboard e lo stato attivo/disattivo."""
+    """
+    Incapsula la catena di effetti e lo stato attivo/disattivo.
 
-    def __init__(self, semitones: float = -4.0, chorus_mix: float = 0.2, enabled: bool = True):
-        self.semitones = semitones
+    Stadio 1 (WORLD): se pyworld e' disponibile e privacy_cfg.enabled e'
+    True, viene applicato il vocoder per modificare F0, formanti e tilt.
+
+    Stadio 2 (Pedalboard): catena di effetti DSP (HPF, LPF, compressore,
+    chorus, gain). PitchShift e' incluso solo in modalita' legacy
+    (pyworld non disponibile).
+    """
+
+    def __init__(
+        self,
+        semitones: float = -4.0,
+        chorus_mix: float = 0.2,
+        enabled: bool = True,
+        privacy_cfg: VoicePrivacyConfig | None = None,
+    ):
+        self.semitones = semitones        # usato solo in modalita' legacy
         self.chorus_mix = chorus_mix
         self.enabled = enabled
         self._lock = threading.Lock()
+
+        self._privacy_cfg_template = privacy_cfg or VoicePrivacyConfig()
+        self._session_cfg = self._privacy_cfg_template.resolve()
+
         self._build_boards()
 
+        use_world = _PYWORLD_AVAILABLE and self._session_cfg.enabled
+        mode = "WORLD + Pedalboard" if use_world else "legacy Pedalboard"
+        print(f"[VoiceAnonymizer] Modalita': {mode}", file=sys.stderr)
+        if use_world:
+            print(
+                f"[VoiceAnonymizer] Parametri sessione — "
+                f"pitch: {self._session_cfg.pitch_shift:+.2f} st | "
+                f"formant_scale: {self._session_cfg.formant_scale:.3f} | "
+                f"tilt: {self._session_cfg.spectral_tilt:+.2f} dB/oct | "
+                f"time_scale: {self._session_cfg.time_scale:.3f}",
+                file=sys.stderr,
+            )
+
     def _build_boards(self):
-        # Catena "alterata": pitch-shift per cambiare l'intonazione di base
-        # (maschera il fondamentale della voce) + filtri passa-alto/basso
-        # per spostare leggermente il timbro/formanti + un chorus leggero
-        # per aggiungere micro-variazioni che confondono il riconoscimento
-        # del parlante, mantenendo comunque il parlato intelligibile per
-        # la trascrizione automatica.
-        self.board_on = Pedalboard([
-            PitchShift(semitones=self.semitones),
-            HighpassFilter(cutoff_frequency_hz=140),
-            LowpassFilter(cutoff_frequency_hz=7000),
-            Chorus(rate_hz=0.7, depth=0.15, mix=self.chorus_mix),
-            Gain(gain_db=0.0),
-        ])
-        # Catena "bypass": nessun effetto, audio originale invariato
+        use_world = _PYWORLD_AVAILABLE and self._session_cfg.enabled
+
+        if use_world:
+            self.board_on = Pedalboard([
+                HighpassFilter(cutoff_frequency_hz=150),
+                LowpassFilter(cutoff_frequency_hz=6000),
+                Compressor(
+                    threshold_db=-22,
+                    ratio=3.0,
+                    attack_ms=5.0,
+                    release_ms=80.0,
+                ),
+                Chorus(
+                    rate_hz=0.7,
+                    depth=0.12,
+                    mix=min(self.chorus_mix, 0.15),
+                ),
+                Gain(gain_db=-1.0),
+            ])
+        else:
+            self.board_on = Pedalboard([
+                PitchShift(semitones=self.semitones),
+                HighpassFilter(cutoff_frequency_hz=140),
+                LowpassFilter(cutoff_frequency_hz=7000),
+                Chorus(rate_hz=0.7, depth=0.15, mix=self.chorus_mix),
+                Gain(gain_db=0.0),
+            ])
+
         self.board_off = Pedalboard([])
 
     def set_semitones(self, value: float):
         with self._lock:
             self.semitones = value
-            self._build_boards()
+            if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
+                self._session_cfg.pitch_shift = value
+            else:
+                self._build_boards()
 
     def set_enabled(self, value: bool):
         with self._lock:
             self.enabled = value
 
-    def toggle(self):
+    def toggle(self) -> bool:
         with self._lock:
             self.enabled = not self.enabled
             return self.enabled
@@ -114,13 +434,42 @@ class VoiceAnonymizer:
         with self._lock:
             return self.board_on if self.enabled else self.board_off
 
+    def session_cfg(self) -> VoicePrivacyConfig:
+        with self._lock:
+            return self._session_cfg
+
+    def process_world(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Applica lo stadio WORLD se disponibile e l'alterazione e' attiva.
+        In caso di qualsiasi eccezione imprevista, restituisce l'audio
+        originale e stampa un avviso, senza mai rompere lo stream.
+        """
+        with self._lock:
+            if not self.enabled:
+                return audio
+            if not (_PYWORLD_AVAILABLE and self._session_cfg.enabled):
+                return audio
+            cfg = self._session_cfg
+        # Esecuzione fuori dal lock per non bloccare altri thread
+        try:
+            result = world_process(audio, sr, cfg)
+        except Exception as exc:
+            print(f"[WORLD] errore nel blocco audio, bypass: {exc}", file=sys.stderr)
+            return audio
+        # Guardia finale: assicura dtype e lunghezza corretti
+        result = result.astype(np.float32)
+        if len(result) != len(audio):
+            # Non dovrebbe mai accadere dopo i fix, ma meglio avere un
+            # fallback che rompere il buffer di sounddevice
+            result = np.resize(result, len(audio))
+        return result
+
 
 # =============================================================================
 # ENUMERAZIONE DISPOSITIVI (tramite sounddevice/PortAudio)
 # =============================================================================
 
 def _device_rows():
-    """Ritorna una lista di dict con le info di ogni dispositivo audio."""
     hostapis = sd.query_hostapis()
     rows = []
     for idx, dev in enumerate(sd.query_devices()):
@@ -154,7 +503,6 @@ def list_devices():
 
 
 def diagnose_devices():
-    """Diagnostica completa: mostra tutti i dispositivi con tutti i dettagli."""
     rows = _device_rows()
     print("\n=== Diagnostica dispositivi audio (sounddevice/PortAudio) ===\n")
     header = f"{'idx':<4} {'in_ch':<6} {'out_ch':<7} {'hostapi':<20} nome"
@@ -180,13 +528,8 @@ def diagnose_devices():
 
 
 def find_device_index(name_or_index, kind: str):
-    """
-    Risolve un nome (anche parziale, case-insensitive) o un indice numerico
-    in un indice di dispositivo valido per 'kind' ('input' oppure 'output').
-    """
     if name_or_index is None:
         return None
-    # Indice numerico esplicito
     try:
         return int(name_or_index)
     except (TypeError, ValueError):
@@ -196,7 +539,6 @@ def find_device_index(name_or_index, kind: str):
     rows = _device_rows()
     channel_key = "in_ch" if kind == "input" else "out_ch"
 
-    # Prima cerca una corrispondenza esatta, poi una parziale
     for r in rows:
         if r[channel_key] > 0 and r["name"].strip().lower() == query:
             return r["index"]
@@ -211,17 +553,29 @@ def find_device_index(name_or_index, kind: str):
 
 
 # =============================================================================
-# MOTORE AUDIO (sounddevice per l'I/O + pedalboard per gli effetti)
+# MOTORE AUDIO (sounddevice per l'I/O + WORLD + Pedalboard per gli effetti)
 # =============================================================================
 
 class AudioEngine:
     """
-    Gestisce lo stream audio full-duplex con sounddevice, applicando ad
-    ogni blocco la catena di effetti fornita da VoiceAnonymizer.
+    Gestisce lo stream audio full-duplex con sounddevice.
+
+    Per ogni blocco audio:
+      1. Mixdown a mono float32
+      2. Stadio WORLD (se disponibile e attivo) — con bypass automatico
+         su silenzio e protezione da eccezioni
+      3. Stadio Pedalboard
+      4. Distribuzione sui canali di output
     """
 
-    def __init__(self, anonymizer: VoiceAnonymizer, input_device, output_device,
-                 samplerate: int = 48000, blocksize: int = 1024):
+    def __init__(
+        self,
+        anonymizer: VoiceAnonymizer,
+        input_device,
+        output_device,
+        samplerate: int = 48000,
+        blocksize: int = 1024,
+    ):
         self.anonymizer = anonymizer
         self.samplerate = samplerate
 
@@ -243,16 +597,32 @@ class AudioEngine:
         if status:
             print(status, file=sys.stderr)
 
-        # Mixdown a mono per l'elaborazione (la voce e' comunque mono)
-        mono = indata.mean(axis=1).astype(np.float32)
+        try:
+            # 1. Mixdown a mono
+            mono = indata.mean(axis=1).astype(np.float32)
 
-        board = self.anonymizer.current_board()
-        # pedalboard si aspetta shape (canali, campioni); usiamo 1 canale
-        processed = board(mono.reshape(1, -1), self.samplerate, reset=False)
-        processed = processed.reshape(-1)
+            # 2. Stadio WORLD
+            mono = self.anonymizer.process_world(mono, self.samplerate)
 
-        # Duplica il mono elaborato su tutti i canali di output richiesti
-        outdata[:] = np.tile(processed.reshape(-1, 1), (1, self.out_channels))
+            # 3. Stadio Pedalboard
+            board = self.anonymizer.current_board()
+            processed = board(mono.reshape(1, -1), self.samplerate, reset=False)
+            processed = processed.reshape(-1)
+
+            # Assicura lunghezza corretta (paranoia difensiva)
+            if len(processed) < frames:
+                processed = np.pad(processed, (0, frames - len(processed)))
+            elif len(processed) > frames:
+                processed = processed[:frames]
+
+            # 4. Output su tutti i canali richiesti
+            outdata[:] = np.tile(processed.reshape(-1, 1), (1, self.out_channels))
+
+        except Exception as exc:
+            # In caso di errore imprevisto azzeriamo l'output per evitare
+            # rumore casuale nel buffer e stampiamo un avviso.
+            outdata.fill(0)
+            print(f"[AudioEngine] errore nel callback, silenzio: {exc}", file=sys.stderr)
 
     def start(self):
         self.stream.start()
@@ -301,15 +671,28 @@ def run_cli(args):
         print(f"Errore: {exc}")
         sys.exit(1)
 
+    privacy_cfg = VoicePrivacyConfig(
+        enabled=True,
+        pitch_shift=args.semitones,
+        formant_scale=args.formant_scale,
+        randomize=args.randomize,
+        pitch_variation=args.pitch_variation,
+        formant_variation=args.formant_variation,
+        spectral_tilt=args.spectral_tilt,
+        time_scale=args.time_scale,
+        noise_floor_dbfs=args.noise_floor if args.noise_floor != 0 else None,
+    )
+
     anonymizer = VoiceAnonymizer(
         semitones=args.semitones,
         chorus_mix=args.chorus_mix,
         enabled=not args.start_disabled,
+        privacy_cfg=privacy_cfg,
     )
 
     print(f"Input : [{input_idx}] {sd.query_devices(input_idx)['name']}")
     print(f"Output: [{output_idx}] {sd.query_devices(output_idx)['name']}")
-    print(f"Pitch shift: {args.semitones} semitoni | Chorus mix: {args.chorus_mix}")
+    print(f"Chorus mix: {args.chorus_mix}")
     print(f"Stato iniziale: {'ATTIVA' if anonymizer.enabled else 'DISATTIVATA'}")
 
     engine = AudioEngine(
@@ -398,10 +781,17 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             root.title("Voice Anonymizer")
             root.resizable(False, False)
 
+            privacy_cfg = VoicePrivacyConfig(
+                enabled=True,
+                pitch_shift=default_semitones,
+                formant_scale=1.10,
+                randomize=True,
+            )
             self.anonymizer = VoiceAnonymizer(
                 semitones=default_semitones,
                 chorus_mix=default_chorus_mix,
                 enabled=True,
+                privacy_cfg=privacy_cfg,
             )
             self.engine = None
 
@@ -445,22 +835,42 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.semitones_label = ttk.Label(frame, text=f"{default_semitones:.1f}", width=5)
             self.semitones_label.grid(row=2, column=2, sticky="w", **pad)
 
+            if _PYWORLD_AVAILABLE:
+                ttk.Label(frame, text="Formant scale:").grid(row=3, column=0, sticky="w", **pad)
+                self.formant_var = tk.DoubleVar(value=1.10)
+                self.formant_scale_slider = ttk.Scale(
+                    frame, from_=0.80, to=1.30, variable=self.formant_var,
+                    command=self._on_formant_change, length=220,
+                )
+                self.formant_scale_slider.grid(row=3, column=1, sticky="we", **pad)
+                self.formant_label = ttk.Label(frame, text="1.10", width=5)
+                self.formant_label.grid(row=3, column=2, sticky="w", **pad)
+
+            btn_row = 4
             self.start_button = ttk.Button(frame, text="Avvia", command=self._toggle_stream)
-            self.start_button.grid(row=3, column=0, **pad)
+            self.start_button.grid(row=btn_row, column=0, **pad)
 
             toggle_frame = ttk.Frame(frame)
-            toggle_frame.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
+            toggle_frame.grid(row=btn_row, column=1, columnspan=2, sticky="w", **pad)
             ttk.Label(toggle_frame, text="Alterazione vocale:").pack(side="left", padx=(0, 8))
             self.toggle = ToggleSwitch(toggle_frame, initial=True, command=self._on_toggle)
             self.toggle.pack(side="left")
 
+            mode_text = (
+                "Pipeline: WORLD + Pedalboard" if _PYWORLD_AVAILABLE
+                else "Pipeline: legacy Pedalboard (installa pyworld per WORLD)"
+            )
+            mode_color = "#1565C0" if _PYWORLD_AVAILABLE else "#E65100"
+            ttk.Label(frame, text=mode_text, foreground=mode_color).grid(
+                row=btn_row + 1, column=0, columnspan=3, sticky="w", **pad
+            )
+
             self.status_label = ttk.Label(frame, text="Stream non avviato", foreground="gray")
-            self.status_label.grid(row=4, column=0, columnspan=3, sticky="w", **pad)
+            self.status_label.grid(row=btn_row + 2, column=0, columnspan=3, sticky="w", **pad)
 
             root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         def _extract_index(self, combo_value: str):
-            # Il valore combobox e' del tipo "[3] Nome dispositivo  (hostapi)"
             try:
                 return int(combo_value.split("]")[0].lstrip("["))
             except (ValueError, IndexError):
@@ -470,6 +880,13 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             value = float(value_str)
             self.semitones_label.config(text=f"{value:.1f}")
             self.anonymizer.set_semitones(value)
+
+        def _on_formant_change(self, value_str):
+            value = float(value_str)
+            if hasattr(self, "formant_label"):
+                self.formant_label.config(text=f"{value:.2f}")
+            with self.anonymizer._lock:
+                self.anonymizer._session_cfg.formant_scale = value
 
         def _on_toggle(self, enabled: bool):
             self.anonymizer.set_enabled(enabled)
@@ -509,7 +926,9 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             else:
                 stato = "ATTIVA (voce alterata)" if self.anonymizer.enabled else "DISATTIVATA (voce originale)"
                 colore = "#2E7D32" if self.anonymizer.enabled else "#757575"
-                self.status_label.config(text=f"Stream attivo — Alterazione: {stato}", foreground=colore)
+                self.status_label.config(
+                    text=f"Stream attivo — Alterazione: {stato}", foreground=colore
+                )
 
         def _on_close(self):
             if self.engine is not None:
@@ -530,26 +949,44 @@ def main():
         description="Alteratore vocale in tempo reale per anonimizzare l'impronta vocale nelle riunioni."
     )
     parser.add_argument("--gui", action="store_true",
-                         help="Avvia l'interfaccia grafica (default se non specifichi --input/--output)")
+                        help="Avvia l'interfaccia grafica (default se non specifichi --input/--output)")
     parser.add_argument("--list-devices", action="store_true",
-                         help="Elenca i dispositivi audio disponibili ed esce")
+                        help="Elenca i dispositivi audio disponibili ed esce")
     parser.add_argument("--diagnose", action="store_true",
-                         help="Diagnostica dettagliata dei dispositivi audio ed esce")
+                        help="Diagnostica dettagliata dei dispositivi audio ed esce")
     parser.add_argument("--input", type=str,
-                         help="Nome (anche parziale) o indice del dispositivo di INPUT — modalita' CLI")
+                        help="Nome (anche parziale) o indice del dispositivo di INPUT")
     parser.add_argument("--output", type=str,
-                         help="Nome (anche parziale) o indice del dispositivo di OUTPUT — modalita' CLI")
-    parser.add_argument("--semitones", type=float, default=-4.0,
-                         help="Pitch-shift in semitoni: negativo = voce piu' grave, positivo = piu' acuta (default: -4.0)")
-    parser.add_argument("--chorus-mix", type=float, default=0.2,
-                         help="Intensita' del chorus (0.0-1.0) (default: 0.2)")
+                        help="Nome (anche parziale) o indice del dispositivo di OUTPUT")
+
+    parser.add_argument("--chorus-mix", type=float, default=0.15,
+                        help="Intensita' del chorus (0.0-1.0) (default: 0.15)")
     parser.add_argument("--samplerate", type=int, default=48000,
-                         help="Frequenza di campionamento (default: 48000)")
+                        help="Frequenza di campionamento (default: 48000)")
     parser.add_argument("--buffer-size", type=int, default=1024,
-                         help="Dimensione del buffer audio; valori piu' bassi = meno latenza ma piu' rischio di glitch (default: 1024)")
+                        help="Dimensione buffer audio (default: 1024)")
     parser.add_argument("--start-disabled", action="store_true",
-                         help="Avvia con l'alterazione disattivata (bypass) — modalita' CLI")
+                        help="Avvia con l'alterazione disattivata (bypass)")
+
+    parser.add_argument("--semitones", type=float, default=-2.5,
+                        help="Pitch shift in semitoni (default: -2.5)")
+    parser.add_argument("--formant-scale", type=float, default=1.10,
+                        help="Scala dei formanti (default: 1.10)")
+    parser.add_argument("--no-randomize", action="store_true",
+                        help="Disabilita la randomizzazione per-sessione")
+    parser.add_argument("--pitch-variation", type=float, default=0.3,
+                        help="Variazione casuale pitch in semitoni (default: 0.3)")
+    parser.add_argument("--formant-variation", type=float, default=0.03,
+                        help="Variazione casuale formant scale (default: 0.03)")
+    parser.add_argument("--spectral-tilt", type=float, default=0.0,
+                        help="Tilt spettrale in dB/ottava (default: 0.0)")
+    parser.add_argument("--time-scale", type=float, default=1.0,
+                        help="Micro time-stretch (default: 1.0 = nessuno)")
+    parser.add_argument("--noise-floor", type=float, default=-55.0,
+                        help="Noise floor in dBFS (default: -55). 0 = disabilitato.")
+
     args = parser.parse_args()
+    args.randomize = not args.no_randomize
 
     if args.diagnose:
         diagnose_devices()
