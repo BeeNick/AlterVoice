@@ -72,6 +72,7 @@ import random
 import sys
 import threading
 import time
+import json
 
 import numpy as np
 import sounddevice as sd
@@ -108,6 +109,28 @@ _SILENCE_RMS_THRESHOLD = 1e-4
 # di default di 5 ms). A 48 kHz, 5 ms = 240 campioni; usiamo un margine
 # generoso di 3x per robustezza.
 _WORLD_MIN_SAMPLES = 720
+
+
+# =============================================================================
+# CONFIGURAZIONE DEVICES
+# =============================================================================
+CONFIG_FILE = "voice_anonymizer_config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_config(in_dev, out_dev):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"input_device": in_dev, "output_device": out_dev}, f)
+    except Exception as e:
+        print(f"Errore salvataggio config: {e}", file=sys.stderr)
 
 
 # =============================================================================
@@ -813,8 +836,17 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             frame = ttk.Frame(root, padding=16)
             frame.grid()
 
+            # ---------------------------------------------------------
+            # 1. CARICAMENTO CONFIGURAZIONE ALL'AVVIO
+            # ---------------------------------------------------------
+            saved_config = load_config() # Legge il file JSON (se esiste)
+
             ttk.Label(frame, text="Microfono (input):").grid(row=0, column=0, sticky="w", **pad)
-            self.input_var = tk.StringVar(value=self.input_options[0] if self.input_options else "")
+            
+            # Cerca il valore salvato, se non lo trova usa il primo della lista
+            default_in = saved_config.get("input_device", self.input_options[0] if self.input_options else "")
+            self.input_var = tk.StringVar(value=default_in)
+            
             self.input_combo = ttk.Combobox(
                 frame, textvariable=self.input_var, values=self.input_options,
                 width=46, state="readonly",
@@ -822,13 +854,31 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.input_combo.grid(row=0, column=1, columnspan=2, **pad)
 
             ttk.Label(frame, text="Dispositivo virtuale (output):").grid(row=1, column=0, sticky="w", **pad)
-            self.output_var = tk.StringVar(value=self.output_options[0] if self.output_options else "")
+            
+            # Cerca il valore salvato, se non lo trova usa il primo della lista
+            default_out = saved_config.get("output_device", self.output_options[0] if self.output_options else "")
+            self.output_var = tk.StringVar(value=default_out)
+            
             self.output_combo = ttk.Combobox(
                 frame, textvariable=self.output_var, values=self.output_options,
                 width=46, state="readonly",
             )
             self.output_combo.grid(row=1, column=1, columnspan=2, **pad)
 
+            # ---------------------------------------------------------
+            # 2. AGGIUNTA DEI PULSANTI SULLA DESTRA
+            # ---------------------------------------------------------
+            btn_frame = ttk.Frame(frame)
+            # Li posizioniamo nella colonna 3, di fianco ai menu a tendina
+            btn_frame.grid(row=0, column=3, rowspan=2, padx=10)
+            
+            # Bottone che esegue self._auto_detect
+            ttk.Button(btn_frame, text="Auto Rileva", command=self._auto_detect).pack(fill="x", pady=2)
+            # Bottone che esegue self._save_settings
+            ttk.Button(btn_frame, text="Salva Impostazioni", command=self._save_settings).pack(fill="x", pady=2)
+
+            # ---------------------------------------------------------
+            
             ttk.Label(frame, text="Pitch shift (semitoni):").grid(row=2, column=0, sticky="w", **pad)
             self.semitones_var = tk.DoubleVar(value=default_semitones)
             self.semitones_scale = ttk.Scale(
@@ -976,7 +1026,26 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             if self.engine is not None:
                 self.engine.stop()
             self.root.destroy()
-            
+
+        def _auto_detect(self):
+            """Interroga il sistema operativo per i dispositivi predefiniti attivi"""
+            in_idx, out_idx = sd.default.device
+            if in_idx is not None:
+                for opt in self.input_options:
+                    if opt.startswith(f"[{in_idx}]"):
+                        self.input_var.set(opt)
+                        break
+            if out_idx is not None:
+                for opt in self.output_options:
+                    if opt.startswith(f"[{out_idx}]"):
+                        self.output_var.set(opt)
+                        break
+
+        def _save_settings(self):
+            """Salva le stringhe selezionate su file JSON"""
+            save_config(self.input_var.get(), self.output_var.get())
+            messagebox.showinfo("Configurazione", "Configurazione salvata con successo!\nVerrà ricaricata al prossimo avvio.")
+
     root = tk.Tk()
     App(root)
     root.mainloop()
@@ -1026,7 +1095,8 @@ def main():
                         help="Micro time-stretch (default: 1.0 = nessuno)")
     parser.add_argument("--noise-floor", type=float, default=-55.0,
                         help="Noise floor in dBFS (default: -55). 0 = disabilitato.")
-
+    parser.add_argument("--check-defaults", action="store_true",
+                        help="Mostra i dispositivi predefiniti di sistema in uso ed esce")
     args = parser.parse_args()
     args.randomize = not args.no_randomize
 
@@ -1036,6 +1106,21 @@ def main():
 
     if args.list_devices:
         list_devices()
+        sys.exit(0)
+
+    if args.check_defaults:
+        in_idx, out_idx = sd.default.device
+        print("\n--- Dispositivi Predefiniti di Sistema (Attualmente in uso) ---")
+        if in_idx is not None:
+            print(f"  INPUT : [{in_idx}] {sd.query_devices(in_idx)['name']}")
+        else:
+            print("  INPUT : Nessun dispositivo predefinito trovato.")
+            
+        if out_idx is not None:
+            print(f"  OUTPUT: [{out_idx}] {sd.query_devices(out_idx)['name']}")
+        else:
+            print("  OUTPUT: Nessun dispositivo predefinito trovato.")
+        print()
         sys.exit(0)
 
     if args.gui or not (args.input and args.output):
