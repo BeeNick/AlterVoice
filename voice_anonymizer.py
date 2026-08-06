@@ -486,7 +486,17 @@ class VoiceAnonymizer:
             self.lpf_cutoff = lpf
             self.comp_threshold = comp_t
             self.comp_ratio = comp_r
-            self._build_boards()
+
+            for fx in self.board_on:
+                if isinstance(fx, HighpassFilter):
+                    fx.cutoff_frequency_hz = hpf
+
+                elif isinstance(fx, LowpassFilter):
+                    fx.cutoff_frequency_hz = lpf
+
+                elif isinstance(fx, Compressor):
+                    fx.threshold_db = comp_t
+                    fx.ratio = comp_r
 
     def set_chorus(self, value: float):
         with self._lock:
