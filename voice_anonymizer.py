@@ -1059,17 +1059,21 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             row_idx += 1
 
             # Slider Saturzione
-            ttk.Label(frame, text="Saturazione:").grid(row=row_idx,column=0)
+            ttk.Label(frame, text="Saturazione:").grid(row=row_idx,column=0, sticky="w", **pad)
             self.saturation_var = tk.DoubleVar(value=self.anonymizer.saturation)
             self.saturation_scale = ttk.Scale(frame, from_=0, to=1, variable=self.saturation_var, command=self._on_saturation_change, length=180 )
-            self.saturation_scale.grid(row=row_idx, column=1)
+            self.saturation_scale.grid(row=row_idx, column=1,  sticky="we", **pad)
+            self.saturation_label = ttk.Label(frame, text=f"{EQ:.2f}", width=5)
+            self.saturation_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx += 1
 
             # Slider EQ
-            ttk.Label(frame, text="EQ Voce (dB):").grid(row=row_idx,column=0)
-            self.eq_var=tk.DoubleVar(value=0)
+            ttk.Label(frame, text="EQ Voce (dB):").grid(row=row_idx,column=0, sticky="w", **pad)
+            self.eq_var=tk.DoubleVar(value=loaded_eq_gain)
             self.eq_scale=ttk.Scale(frame, from_=-12, to=12, variable=self.eq_var, command=self._on_eq_change, length=180 )
-            self.eq_scale.grid(row=row_idx, column=1)
+            self.eq_scale.grid(row=row_idx, column=1,  sticky="we", **pad)
+            self.eq_label = ttk.Label(frame, text=f"{EQ:.2f}", width=5)
+            self.eq_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx+=1
 
             # Slider Riverbero
@@ -1109,7 +1113,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             # Slider Volume (Gain)
             ttk.Label(frame, text="Volume Output (dB):").grid(row=row_idx, column=0, sticky="w", **pad)
             self.gain_var = tk.DoubleVar(value=loaded_gain)
-            self.gain_scale = ttk.Scale(frame, from_=-12.0, to=12.0, variable=self.gain_var, command=self._on_gain_change, length=180)
+            self.gain_scale = ttk.Scale(frame, from_=-10.0, to=20.0, variable=self.gain_var, command=self._on_gain_change, length=180)
             self.gain_scale.grid(row=row_idx, column=1, sticky="we", **pad)
             self.gain_label = ttk.Label(frame, text=f"{loaded_gain:.1f}", width=5)
             self.gain_label.grid(row=row_idx, column=2, sticky="w", **pad)
