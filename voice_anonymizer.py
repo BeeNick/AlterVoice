@@ -483,8 +483,8 @@ class VoiceAnonymizer:
 
             # quando passo a modalità legacy,
             # sincronizzo il pitch corrente nel PitchShift
-            if not value:
-              self._build_boards()
+            #if not value:
+            #  self._build_boards()
 
     def update_dsp_settings(self, hpf, lpf, comp_t, comp_r):
         with self._lock:
