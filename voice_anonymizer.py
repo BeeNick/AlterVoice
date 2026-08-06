@@ -129,7 +129,7 @@ def load_config():
             pass
     return {}
 
-def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain, world_enabled, hpf, lpf, comp_thresh, comp_ratio):
+def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain, world_enabled, hpf, lpf, comp_thresh, comp_ratio, saturation, eq_gain):
     try:
         data = {
             "input_device": in_dev,
@@ -143,7 +143,9 @@ def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain, world
             "hpf_cutoff": hpf,
             "lpf_cutoff": lpf,
             "comp_threshold": comp_thresh,
-            "comp_ratio": comp_ratio
+            "comp_ratio": comp_ratio,
+            "saturation": saturation,
+            "eq_gain_db": eq_gain
         }
         with open(CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=4)
@@ -960,6 +962,9 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             loaded_lpf = saved_config.get("lpf_cutoff", 6000)
             loaded_comp_t = saved_config.get("comp_threshold", -22.0)
             loaded_comp_r = saved_config.get("comp_ratio", 3.0)
+            loaded_saturation = saved_config.get("saturation", 0.0)
+            loaded_eq_gain = saved_config.get("eq_gain_db", 0.0)
+
 
             privacy_cfg = VoicePrivacyConfig(
                 enabled=loaded_world,
@@ -979,6 +984,8 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 comp_ratio=loaded_comp_r,
                 enabled=True,
                 privacy_cfg=privacy_cfg,
+                saturation=loaded_saturation,
+                eq_gain_db=loaded_eq_gain,
             )
             self.engine = None
 
@@ -1285,7 +1292,9 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 hpf=int(self.hpf_var.get()),
                 lpf=int(self.lpf_var.get()),
                 comp_thresh=float(self.comp_t_var.get()),
-                comp_ratio=3.0
+                comp_ratio=3.0,
+                saturation=float(self.saturation_var.get()),
+                eq_gain=float(self.eq_var.get())
             )
             messagebox.showinfo("Configurazione", "Tutte le impostazioni avanzate e i filtri sono stati salvati!")
         
