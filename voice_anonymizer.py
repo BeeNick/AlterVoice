@@ -126,7 +126,7 @@ def load_config():
             pass
     return {}
 
-def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain):
+def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain, world_enabled, hpf, lpf, comp_thresh, comp_ratio):
     try:
         data = {
             "input_device": in_dev,
@@ -135,7 +135,12 @@ def save_config(in_dev, out_dev, semitones, formant, chorus, reverb, gain):
             "formant_scale": formant,
             "chorus_mix": chorus,
             "reverb_mix": reverb,
-            "gain_db": gain
+            "gain_db": gain,
+            "world_enabled": world_enabled,
+            "hpf_cutoff": hpf,
+            "lpf_cutoff": lpf,
+            "comp_threshold": comp_thresh,
+            "comp_ratio": comp_ratio
         }
         with open(CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=4)
@@ -390,6 +395,11 @@ class VoiceAnonymizer:
         chorus_mix: float = 0.03,
         reverb_mix: float = 0.15,
         gain_db: float = 0.0,
+        world_enabled: bool = True,
+        hpf_cutoff: int = 150,
+        lpf_cutoff: int = 6000,
+        comp_threshold: float = -22.0,
+        comp_ratio: float = 3.0,
         enabled: bool = True,
         privacy_cfg: VoicePrivacyConfig | None = None,
     ):
@@ -397,37 +407,30 @@ class VoiceAnonymizer:
         self.chorus_mix = chorus_mix
         self.reverb_mix = reverb_mix
         self.gain_db = gain_db
+        self.world_enabled = world_enabled
+        self.hpf_cutoff = hpf_cutoff
+        self.lpf_cutoff = lpf_cutoff
+        self.comp_threshold = comp_threshold
+        self.comp_ratio = comp_ratio
         self.enabled = enabled
         self._lock = threading.Lock()
 
         self._privacy_cfg_template = privacy_cfg or VoicePrivacyConfig()
         self._session_cfg = self._privacy_cfg_template.resolve()
+        self._session_cfg.enabled = world_enabled
 
         self._build_boards()
 
-        use_world = _PYWORLD_AVAILABLE and self._session_cfg.enabled
-        mode = "WORLD + Pedalboard" if use_world else "legacy Pedalboard"
-        print(f"[VoiceAnonymizer] Modalita': {mode}", file=sys.stderr)
-        if use_world:
-            print(
-                f"[VoiceAnonymizer] Parametri sessione — "
-                f"pitch: {self._session_cfg.pitch_shift:+.2f} st | "
-                f"formant_scale: {self._session_cfg.formant_scale:.3f} | "
-                f"tilt: {self._session_cfg.spectral_tilt:+.2f} dB/oct | "
-                f"time_scale: {self._session_cfg.time_scale:.3f}",
-                file=sys.stderr,
-            )
-
     def _build_boards(self):
-        use_world = _PYWORLD_AVAILABLE and self._session_cfg.enabled
+        use_world = _PYWORLD_AVAILABLE and self.world_enabled and self._session_cfg.enabled
 
         if use_world:
             self.board_on = Pedalboard([
-                HighpassFilter(cutoff_frequency_hz=150),
-                LowpassFilter(cutoff_frequency_hz=6000),
+                HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
+                LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
                 Compressor(
-                    threshold_db=-22,
-                    ratio=3.0,
+                    threshold_db=self.comp_threshold,
+                    ratio=self.comp_ratio,
                     attack_ms=5.0,
                     release_ms=80.0,
                 ),
@@ -447,8 +450,8 @@ class VoiceAnonymizer:
         else:
             self.board_on = Pedalboard([
                 PitchShift(semitones=self.semitones),
-                HighpassFilter(cutoff_frequency_hz=140),
-                LowpassFilter(cutoff_frequency_hz=7000),
+                HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
+                LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
                 Chorus(rate_hz=0.5, depth=0.1, mix=self.chorus_mix),
                 Reverb(room_size=0.15, damping=0.7, wet_level=self.reverb_mix, dry_level=max(0.0, 1.0 - self.reverb_mix)),
                 Gain(gain_db=self.gain_db),
@@ -456,10 +459,23 @@ class VoiceAnonymizer:
 
         self.board_off = Pedalboard([])
 
+    def set_world_enabled(self, value: bool):
+        with self._lock:
+            self.world_enabled = value
+            self._session_cfg.enabled = value
+            self._build_boards()
+
+    def update_dsp_settings(self, hpf, lpf, comp_t, comp_r):
+        with self._lock:
+            self.hpf_cutoff = hpf
+            self.lpf_cutoff = lpf
+            self.comp_threshold = comp_t
+            self.comp_ratio = comp_r
+            self._build_boards()
+
     def set_chorus(self, value: float):
         with self._lock:
             self.chorus_mix = value
-            # Cerca e aggiorna l'effetto Chorus nella board attiva se esiste
             for fx in self.board_on:
                 if isinstance(fx, Chorus):
                     fx.mix = value
@@ -476,14 +492,6 @@ class VoiceAnonymizer:
                     return
             self._build_boards()
 
-    def set_semitones(self, value: float):
-        with self._lock:
-            self.semitones = value
-            if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
-                self._session_cfg.pitch_shift = value
-            else:
-                self._build_boards()
-
     def set_gain(self, value: float):
         with self._lock:
             self.gain_db = value
@@ -492,6 +500,14 @@ class VoiceAnonymizer:
                     fx.gain_db = value
                     return
             self._build_boards()
+
+    def set_semitones(self, value: float):
+        with self._lock:
+            self.semitones = value
+            if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
+                self._session_cfg.pitch_shift = value
+            else:
+                self._build_boards()
 
     def set_enabled(self, value: bool):
         with self._lock:
@@ -854,10 +870,9 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
     class App:
         def __init__(self, root):
             self.root = root
-            root.title("Voice Anonymizer")
+            root.title("Voice Anonymizer - Avanzato")
             root.resizable(False, False)
 
-            # Carica la configurazione salvata dal JSON (se esiste)
             saved_config = load_config()
             
             loaded_semitones = saved_config.get("semitones", default_semitones)
@@ -865,9 +880,14 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             loaded_chorus = saved_config.get("chorus_mix", 0.03)
             loaded_reverb = saved_config.get("reverb_mix", 0.15)
             loaded_gain = saved_config.get("gain_db", 0.0)
+            loaded_world = saved_config.get("world_enabled", True)
+            loaded_hpf = saved_config.get("hpf_cutoff", 150)
+            loaded_lpf = saved_config.get("lpf_cutoff", 6000)
+            loaded_comp_t = saved_config.get("comp_threshold", -22.0)
+            loaded_comp_r = saved_config.get("comp_ratio", 3.0)
 
             privacy_cfg = VoicePrivacyConfig(
-                enabled=True,
+                enabled=loaded_world,
                 pitch_shift=loaded_semitones,
                 formant_scale=loaded_formant,
                 randomize=True,
@@ -877,6 +897,11 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 chorus_mix=loaded_chorus,
                 reverb_mix=loaded_reverb,
                 gain_db=loaded_gain,
+                world_enabled=loaded_world,
+                hpf_cutoff=loaded_hpf,
+                lpf_cutoff=loaded_lpf,
+                comp_threshold=loaded_comp_t,
+                comp_ratio=loaded_comp_r,
                 enabled=True,
                 privacy_cfg=privacy_cfg,
             )
@@ -892,70 +917,103 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 for r in self.device_rows if r["out_ch"] > 0
             ]
 
-            pad = {"padx": 8, "pady": 4}
-            frame = ttk.Frame(root, padding=16)
+            pad = {"padx": 6, "pady": 3}
+            frame = ttk.Frame(root, padding=12)
             frame.grid()
 
-            # Dispositivi Input / Output con supporto salvataggio JSON
+            # Dispositivi Input / Output
             ttk.Label(frame, text="Microfono (input):").grid(row=0, column=0, sticky="w", **pad)
             default_in = saved_config.get("input_device", self.input_options[0] if self.input_options else "")
             self.input_var = tk.StringVar(value=default_in)
-            self.input_combo = ttk.Combobox(frame, textvariable=self.input_var, values=self.input_options, width=40, state="readonly")
+            self.input_combo = ttk.Combobox(frame, textvariable=self.input_var, values=self.input_options, width=38, state="readonly")
             self.input_combo.grid(row=0, column=1, columnspan=2, **pad)
 
             ttk.Label(frame, text="Dispositivo virtuale (output):").grid(row=1, column=0, sticky="w", **pad)
             default_out = saved_config.get("output_device", self.output_options[0] if self.output_options else "")
             self.output_var = tk.StringVar(value=default_out)
-            self.output_combo = ttk.Combobox(frame, textvariable=self.output_var, values=self.output_options, width=40, state="readonly")
+            self.output_combo = ttk.Combobox(frame, textvariable=self.output_var, values=self.output_options, width=38, state="readonly")
             self.output_combo.grid(row=1, column=1, columnspan=2, **pad)
 
-            # Pulsanti Auto-Rileva e Salva sulla destra
+            # Pulsanti Auto-Rileva e Salva
             btn_frame = ttk.Frame(frame)
-            btn_frame.grid(row=0, column=3, rowspan=2, padx=10)
+            btn_frame.grid(row=0, column=3, rowspan=2, padx=8)
             ttk.Button(btn_frame, text="Auto Rileva", command=self._auto_detect).pack(fill="x", pady=2)
             ttk.Button(btn_frame, text="Salva Impostazioni", command=self._save_settings).pack(fill="x", pady=2)
 
-            # Slider Pitch Shift
-            ttk.Label(frame, text="Pitch shift (semitoni):").grid(row=2, column=0, sticky="w", **pad)
-            self.semitones_var = tk.DoubleVar(value=loaded_semitones)
-            self.semitones_scale = ttk.Scale(frame, from_=-12, to=12, variable=self.semitones_var, command=self._on_semitones_change, length=200)
-            self.semitones_scale.grid(row=2, column=1, sticky="we", **pad)
-            self.semitones_label = ttk.Label(frame, text=f"{loaded_semitones:.1f}", width=5)
-            self.semitones_label.grid(row=2, column=2, sticky="w", **pad)
+            row_idx = 2
 
-            # Slider Formant Scale (se pyworld è attivo)
-            row_idx = 3
+            # --- Checkbox per abilitare/disabilitare WORLD ---
+            self.world_var = tk.BooleanVar(value=loaded_world)
+            self.world_check = ttk.Checkbutton(frame, text="Abilita Vocoder WORLD (Robotico/Avanzato)", variable=self.world_var, command=self._on_world_toggle)
+            self.world_check.grid(row=row_idx, column=0, columnspan=3, sticky="w", **pad)
+            row_idx += 1
+
+            # Slider Pitch Shift
+            ttk.Label(frame, text="Pitch shift (semitoni):").grid(row=row_idx, column=0, sticky="w", **pad)
+            self.semitones_var = tk.DoubleVar(value=loaded_semitones)
+            self.semitones_scale = ttk.Scale(frame, from_=-12, to=12, variable=self.semitones_var, command=self._on_semitones_change, length=180)
+            self.semitones_scale.grid(row=row_idx, column=1, sticky="we", **pad)
+            self.semitones_label = ttk.Label(frame, text=f"{loaded_semitones:.1f}", width=5)
+            self.semitones_label.grid(row=row_idx, column=2, sticky="w", **pad)
+            row_idx += 1
+
+            # Slider Formant Scale
             if _PYWORLD_AVAILABLE:
                 ttk.Label(frame, text="Formant scale:").grid(row=row_idx, column=0, sticky="w", **pad)
                 self.formant_var = tk.DoubleVar(value=loaded_formant)
-                self.formant_scale_slider = ttk.Scale(frame, from_=0.80, to=1.30, variable=self.formant_var, command=self._on_formant_change, length=200)
+                self.formant_scale_slider = ttk.Scale(frame, from_=0.80, to=1.30, variable=self.formant_var, command=self._on_formant_change, length=180)
                 self.formant_scale_slider.grid(row=row_idx, column=1, sticky="we", **pad)
                 self.formant_label = ttk.Label(frame, text=f"{loaded_formant:.2f}", width=5)
                 self.formant_label.grid(row=row_idx, column=2, sticky="w", **pad)
                 row_idx += 1
 
-            # --- NUOVO: Slider Chorus ---
+            # Slider Chorus
             ttk.Label(frame, text="Chorus Mix:").grid(row=row_idx, column=0, sticky="w", **pad)
             self.chorus_var = tk.DoubleVar(value=loaded_chorus)
-            self.chorus_scale = ttk.Scale(frame, from_=0.0, to=0.3, variable=self.chorus_var, command=self._on_chorus_change, length=200)
+            self.chorus_scale = ttk.Scale(frame, from_=0.0, to=0.3, variable=self.chorus_var, command=self._on_chorus_change, length=180)
             self.chorus_scale.grid(row=row_idx, column=1, sticky="we", **pad)
             self.chorus_label = ttk.Label(frame, text=f"{loaded_chorus:.2f}", width=5)
             self.chorus_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx += 1
 
-            # --- NUOVO: Slider Riverbero ---
+            # Slider Riverbero
             ttk.Label(frame, text="Reverb (Stanza):").grid(row=row_idx, column=0, sticky="w", **pad)
             self.reverb_var = tk.DoubleVar(value=loaded_reverb)
-            self.reverb_scale = ttk.Scale(frame, from_=0.0, to=0.5, variable=self.reverb_var, command=self._on_reverb_change, length=200)
+            self.reverb_scale = ttk.Scale(frame, from_=0.0, to=0.5, variable=self.reverb_var, command=self._on_reverb_change, length=180)
             self.reverb_scale.grid(row=row_idx, column=1, sticky="we", **pad)
             self.reverb_label = ttk.Label(frame, text=f"{loaded_reverb:.2f}", width=5)
             self.reverb_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx += 1
 
+            # --- NUOVO: Filtri e Compressore ---
+            ttk.Label(frame, text="Filtro Taglio Bassi (HPF Hz):").grid(row=row_idx, column=0, sticky="w", **pad)
+            self.hpf_var = tk.IntVar(value=loaded_hpf)
+            self.hpf_scale = ttk.Scale(frame, from_=0, to=300, variable=self.hpf_var, command=self._on_dsp_change, length=180)
+            self.hpf_scale.grid(row=row_idx, column=1, sticky="we", **pad)
+            self.hpf_label = ttk.Label(frame, text=f"{loaded_hpf}", width=5)
+            self.hpf_label.grid(row=row_idx, column=2, sticky="w", **pad)
+            row_idx += 1
+
+            ttk.Label(frame, text="Filtro Taglio Alti (LPF Hz):").grid(row=row_idx, column=0, sticky="w", **pad)
+            self.lpf_var = tk.IntVar(value=loaded_lpf)
+            self.lpf_scale = ttk.Scale(frame, from_=2000, to=10000, variable=self.lpf_var, command=self._on_dsp_change, length=180)
+            self.lpf_scale.grid(row=row_idx, column=1, sticky="we", **pad)
+            self.lpf_label = ttk.Label(frame, text=f"{loaded_lpf}", width=5)
+            self.lpf_label.grid(row=row_idx, column=2, sticky="w", **pad)
+            row_idx += 1
+
+            ttk.Label(frame, text="Comp. Soglia (dB):").grid(row=row_idx, column=0, sticky="w", **pad)
+            self.comp_t_var = tk.DoubleVar(value=loaded_comp_t)
+            self.comp_t_scale = ttk.Scale(frame, from_=-40, to=0, variable=self.comp_t_var, command=self._on_dsp_change, length=180)
+            self.comp_t_scale.grid(row=row_idx, column=1, sticky="we", **pad)
+            self.comp_t_label = ttk.Label(frame, text=f"{loaded_comp_t:.1f}", width=5)
+            self.comp_t_label.grid(row=row_idx, column=2, sticky="w", **pad)
+            row_idx += 1
+
             # Slider Volume (Gain)
             ttk.Label(frame, text="Volume Output (dB):").grid(row=row_idx, column=0, sticky="w", **pad)
             self.gain_var = tk.DoubleVar(value=loaded_gain)
-            self.gain_scale = ttk.Scale(frame, from_=-12.0, to=12.0, variable=self.gain_var, command=self._on_gain_change, length=200)
+            self.gain_scale = ttk.Scale(frame, from_=-12.0, to=12.0, variable=self.gain_var, command=self._on_gain_change, length=180)
             self.gain_scale.grid(row=row_idx, column=1, sticky="we", **pad)
             self.gain_label = ttk.Label(frame, text=f"{loaded_gain:.1f}", width=5)
             self.gain_label.grid(row=row_idx, column=2, sticky="w", **pad)
@@ -968,29 +1026,25 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
 
             toggle_frame = ttk.Frame(frame)
             toggle_frame.grid(row=btn_row, column=1, columnspan=2, sticky="w", **pad)
-            ttk.Label(toggle_frame, text="Alterazione vocale:").pack(side="left", padx=(0, 8))
+            ttk.Label(toggle_frame, text="Alterazione vocale:").pack(side="left", padx=(0, 6))
             self.toggle = ToggleSwitch(toggle_frame, initial=True, command=self._on_toggle)
             self.toggle.pack(side="left")
 
-            # Informazioni pipeline e stato
-            mode_text = "Pipeline: WORLD + Pedalboard" if _PYWORLD_AVAILABLE else "Pipeline: legacy Pedalboard"
-            mode_color = "#1565C0" if _PYWORLD_AVAILABLE else "#E65100"
-            ttk.Label(frame, text=mode_text, foreground=mode_color).grid(row=btn_row + 1, column=0, columnspan=3, sticky="w", **pad)
-
+            # Status e Meter
+            ttk.Label(frame, text="Pipeline: Gestione Avanzata DSP", foreground="#1565C0").grid(row=btn_row + 1, column=0, columnspan=3, sticky="w", **pad)
             self.status_label = ttk.Label(frame, text="Stream non avviato", foreground="gray")
             self.status_label.grid(row=btn_row + 2, column=0, columnspan=3, sticky="w", **pad)
 
-            # Riquadro misuratori audio (Meter)
-            meter_frame = ttk.LabelFrame(frame, text="Livelli Segnale", padding=8)
+            meter_frame = ttk.LabelFrame(frame, text="Livelli Segnale", padding=6)
             meter_frame.grid(row=btn_row + 3, column=0, columnspan=3, sticky="we", **pad)
             
             ttk.Label(meter_frame, text="Mic (In):").grid(row=0, column=0, sticky="w")
-            self.in_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=250, mode="determinate")
-            self.in_meter.grid(row=0, column=1, padx=8, pady=4, sticky="we")
+            self.in_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=220, mode="determinate")
+            self.in_meter.grid(row=0, column=1, padx=6, pady=2, sticky="we")
 
             ttk.Label(meter_frame, text="Virtual (Out):").grid(row=1, column=0, sticky="w")
-            self.out_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=250, mode="determinate")
-            self.out_meter.grid(row=1, column=1, padx=8, pady=4, sticky="we")
+            self.out_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=220, mode="determinate")
+            self.out_meter.grid(row=1, column=1, padx=6, pady=2, sticky="we")
 
             root.protocol("WM_DELETE_WINDOW", self._on_close)
             self._update_meters()
@@ -1112,8 +1166,23 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.gain_label.config(text=f"{value:.1f}")
             self.anonymizer.set_gain(value)
 
+        def _on_world_toggle(self):
+            val = self.world_var.get()
+            self.anonymizer.set_world_enabled(val)
+
+        def _on_dsp_change(self, _event=None):
+            hpf_val = int(self.hpf_var.get())
+            lpf_val = int(self.lpf_var.get())
+            comp_t_val = float(self.comp_t_var.get())
+            
+            self.hpf_label.config(text=f"{hpf_val}")
+            self.lpf_label.config(text=f"{lpf_val}")
+            self.comp_t_label.config(text=f"{comp_t_val:.1f}")
+            
+            # Usiamo un rapporto di compressione fisso a 3.0 o lo lasciamo invariato
+            self.anonymizer.update_dsp_settings(hpf_val, lpf_val, comp_t_val, 3.0)
+
         def _save_settings(self):
-            """Salva tutti i dispositivi e i parametri correnti su file JSON"""
             formant_val = self.formant_var.get() if hasattr(self, "formant_var") else 1.10
             save_config(
                 in_dev=self.input_var.get(),
@@ -1122,10 +1191,15 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 formant=formant_val,
                 chorus=self.chorus_var.get(),
                 reverb=self.reverb_var.get(),
-                gain=self.gain_var.get()
+                gain=self.gain_var.get(),
+                world_enabled=self.world_var.get(),
+                hpf=int(self.hpf_var.get()),
+                lpf=int(self.lpf_var.get()),
+                comp_thresh=float(self.comp_t_var.get()),
+                comp_ratio=3.0
             )
-            messagebox.showinfo("Configurazione", "Tutte le impostazioni sono state salvate con successo!")
-
+            messagebox.showinfo("Configurazione", "Tutte le impostazioni avanzate e i filtri sono stati salvati!")
+            
     root = tk.Tk()
     App(root)
     root.mainloop()
