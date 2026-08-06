@@ -555,17 +555,9 @@ def find_device_index(name_or_index, kind: str):
 # =============================================================================
 # MOTORE AUDIO (sounddevice per l'I/O + WORLD + Pedalboard per gli effetti)
 # =============================================================================
-
 class AudioEngine:
     """
     Gestisce lo stream audio full-duplex con sounddevice.
-
-    Per ogni blocco audio:
-      1. Mixdown a mono float32
-      2. Stadio WORLD (se disponibile e attivo) — con bypass automatico
-         su silenzio e protezione da eccezioni
-      3. Stadio Pedalboard
-      4. Distribuzione sui canali di output
     """
 
     def __init__(
@@ -578,6 +570,10 @@ class AudioEngine:
     ):
         self.anonymizer = anonymizer
         self.samplerate = samplerate
+        
+        # Nuove variabili per esporre il livello audio alla GUI
+        self.current_in_level = 0.0
+        self.current_out_level = 0.0
 
         in_info = sd.query_devices(input_device)
         out_info = sd.query_devices(output_device)
@@ -600,6 +596,9 @@ class AudioEngine:
         try:
             # 1. Mixdown a mono
             mono = indata.mean(axis=1).astype(np.float32)
+            
+            # --- Calcolo RMS Input per la GUI ---
+            self.current_in_level = float(np.sqrt(np.mean(mono**2)))
 
             # 2. Stadio WORLD
             mono = self.anonymizer.process_world(mono, self.samplerate)
@@ -614,14 +613,17 @@ class AudioEngine:
                 processed = np.pad(processed, (0, frames - len(processed)))
             elif len(processed) > frames:
                 processed = processed[:frames]
+                
+            # --- Calcolo RMS Output per la GUI ---
+            self.current_out_level = float(np.sqrt(np.mean(processed**2)))
 
             # 4. Output su tutti i canali richiesti
             outdata[:] = np.tile(processed.reshape(-1, 1), (1, self.out_channels))
 
         except Exception as exc:
-            # In caso di errore imprevisto azzeriamo l'output per evitare
-            # rumore casuale nel buffer e stampiamo un avviso.
             outdata.fill(0)
+            self.current_in_level = 0.0
+            self.current_out_level = 0.0
             print(f"[AudioEngine] errore nel callback, silenzio: {exc}", file=sys.stderr)
 
     def start(self):
@@ -633,7 +635,9 @@ class AudioEngine:
             self.stream.close()
         except Exception:
             pass
-
+        finally:
+            self.current_in_level = 0.0
+            self.current_out_level = 0.0
 
 # =============================================================================
 # MODALITA' RIGA DI COMANDO
@@ -868,7 +872,45 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.status_label = ttk.Label(frame, text="Stream non avviato", foreground="gray")
             self.status_label.grid(row=btn_row + 2, column=0, columnspan=3, sticky="w", **pad)
 
+            # --- NUOVO: Riquadro misuratori audio ---
+            meter_frame = ttk.LabelFrame(frame, text="Livelli Segnale", padding=8)
+            meter_frame.grid(row=btn_row + 3, column=0, columnspan=3, sticky="we", **pad)
+            
+            ttk.Label(meter_frame, text="Mic (In):").grid(row=0, column=0, sticky="w")
+            self.in_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=280, mode="determinate")
+            self.in_meter.grid(row=0, column=1, padx=8, pady=4, sticky="we")
+
+            ttk.Label(meter_frame, text="Virtual (Out):").grid(row=1, column=0, sticky="w")
+            self.out_meter = ttk.Progressbar(meter_frame, orient="horizontal", length=280, mode="determinate")
+            self.out_meter.grid(row=1, column=1, padx=8, pady=4, sticky="we")
+
             root.protocol("WM_DELETE_WINDOW", self._on_close)
+            
+            # Avvia il loop di aggiornamento dei misuratori
+            self._update_meters()
+
+        def _rms_to_percent(self, rms: float) -> float:
+            """Mappa un valore RMS lineare su una scala visiva (pseudo-logaritmica)."""
+            if rms < 1e-5:
+                return 0.0
+            db = 20 * np.log10(rms)
+            # Mappiamo arbitrariamente: -50 dB = 0%, 0 dB = 100%
+            percent = (db + 50) * 2
+            return max(0.0, min(100.0, percent))
+
+        def _update_meters(self):
+            """Aggiorna le barre della GUI interrogando l'AudioEngine in modo sicuro."""
+            if self.engine is not None:
+                in_val = self._rms_to_percent(self.engine.current_in_level)
+                out_val = self._rms_to_percent(self.engine.current_out_level)
+                self.in_meter["value"] = in_val
+                self.out_meter["value"] = out_val
+            else:
+                self.in_meter["value"] = 0
+                self.out_meter["value"] = 0
+                
+            # Ripianifica l'aggiornamento a ~20 FPS
+            self.root.after(50, self._update_meters)
 
         def _extract_index(self, combo_value: str):
             try:
@@ -934,7 +976,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             if self.engine is not None:
                 self.engine.stop()
             self.root.destroy()
-
+            
     root = tk.Tk()
     App(root)
     root.mainloop()
