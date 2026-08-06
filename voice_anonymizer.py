@@ -1278,6 +1278,12 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             # Usiamo un rapporto di compressione fisso a 3.0 o lo lasciamo invariato
             self.anonymizer.update_dsp_settings(hpf_val, lpf_val, comp_t_val, 3.0)
 
+        def _on_saturation_change(self,value):
+            self.anonymizer.saturation=float(value)
+
+        def _on_eq_change(self,value):
+            self.anonymizer.eq_gain_db=float(value)
+
         def _save_settings(self):
             formant_val = self.formant_var.get() if hasattr(self, "formant_var") else 1.10
             save_config(
@@ -1298,8 +1304,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             )
             messagebox.showinfo("Configurazione", "Tutte le impostazioni avanzate e i filtri sono stati salvati!")
         
-        def _on_saturation_change(self,value):
-            self.anonymizer.saturation=float(value)
+        
 
     root = tk.Tk()
     App(root)
