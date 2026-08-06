@@ -86,6 +86,9 @@ from pedalboard import (
     Chorus,
     Gain,
     Reverb,
+    PeakFilter,
+    HighShelfFilter,
+    LowShelfFilter,
 )
 
 # Prova a importare pyworld; se non disponibile usa la modalita' legacy
@@ -372,6 +375,36 @@ def world_process(
 
     return synthesized
 
+# =============================================================================
+# Altre alterazioni
+# =============================================================================
+
+
+def apply_saturation(audio: np.ndarray, amount: float) -> np.ndarray:
+    """
+    Saturazione morbida tipo tape/valvolare.
+
+    amount:
+      0.0 = nessuna saturazione
+      1.0 = forte saturazione
+    """
+
+    if amount <= 0:
+        return audio
+
+    drive = 1.0 + (amount * 8.0)
+
+    saturated = np.tanh(audio * drive)
+
+    # compensazione volume
+    saturated /= np.max(
+        np.abs(saturated)
+    ) + 1e-6
+
+    return (
+        saturated *
+        np.max(np.abs(audio))
+    ).astype(np.float32)
 
 # =============================================================================
 # LOGICA DI ALTERAZIONE VOCALE (condivisa tra CLI e GUI)
@@ -402,6 +435,8 @@ class VoiceAnonymizer:
         comp_ratio: float = 3.0,
         enabled: bool = True,
         privacy_cfg: VoicePrivacyConfig | None = None,
+        saturation: float = 0.0,
+        eq_gain_db: float = 0.0,
     ):
         self.semitones = semitones
         self.chorus_mix = chorus_mix
@@ -413,6 +448,8 @@ class VoiceAnonymizer:
         self.comp_threshold = comp_threshold
         self.comp_ratio = comp_ratio
         self.enabled = enabled
+        self.saturation = saturation
+        self.eq_gain_db = eq_gain_db
         self._lock = threading.Lock()
 
         self._privacy_cfg_template = privacy_cfg or VoicePrivacyConfig()
@@ -454,6 +491,11 @@ class VoiceAnonymizer:
                 PitchShift(semitones=self.semitones),  # Ora incluso correttamente!
                 HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
                 LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
+                PeakFilter(
+                    cutoff_frequency_hz=1500,
+                    gain_db=self.eq_gain_db,
+                    q=0.8,
+                ),
                 Compressor(
                     threshold_db=self.comp_threshold,
                     ratio=self.comp_ratio,
@@ -528,13 +570,13 @@ class VoiceAnonymizer:
 
     def set_semitones(self, value: float):
         with self._lock:
-            self.semitones = value
-            if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
-                self._session_cfg.pitch_shift = value
 
-            # se WORLD è spento, aggiorna il PitchShift legacy
-            else:
-                self._build_boards()
+            self.semitones = value
+
+            self._session_cfg.pitch_shift = value
+
+            if not _PYWORLD_AVAILABLE:
+              self._build_boards()
 
     def set_enabled(self, value: bool):
         with self._lock:
@@ -725,8 +767,9 @@ class AudioEngine:
 
             # 3. Stadio Pedalboard
             board = self.anonymizer.current_board()
-            processed = board(mono.reshape(1, -1), self.samplerate, reset=False)
+            processed = board( mono.reshape(1,-1), self.samplerate, reset=False)
             processed = processed.reshape(-1)
+            processed = apply_saturation( processed, self.anonymizer.saturation)
 
             # Assicura lunghezza corretta (paranoia difensiva)
             if len(processed) < frames:
@@ -1008,6 +1051,20 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.chorus_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx += 1
 
+            # Slider Saturzione
+            ttk.Label(frame, text="Saturazione:").grid(row=row_idx,column=0)
+            self.saturation_var = tk.DoubleVar(value=self.anonymizer.saturation)
+            self.saturation_scale = ttk.Scale(frame, from_=0, to=1, variable=self.saturation_var, command=self._on_saturation_change, length=180 )
+            self.saturation_scale.grid(row=row_idx, column=1)
+            row_idx += 1
+
+            # Slider EQ
+            ttk.Label(frame, text="EQ Voce (dB):").grid(row=row_idx,column=0)
+            self.eq_var=tk.DoubleVar(value=0)
+            self.eq_scale=ttk.Scale(frame, from_=-12, to=12, variable=self.eq_var, command=self._on_eq_change, length=180 )
+            self.eq_scale.grid(row=row_idx, column=1)
+            row_idx+=1
+
             # Slider Riverbero
             ttk.Label(frame, text="Reverb (Stanza):").grid(row=row_idx, column=0, sticky="w", **pad)
             self.reverb_var = tk.DoubleVar(value=loaded_reverb)
@@ -1017,7 +1074,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.reverb_label.grid(row=row_idx, column=2, sticky="w", **pad)
             row_idx += 1
 
-            # --- NUOVO: Filtri e Compressore ---
+            # --- Filtri e Compressore ---
             ttk.Label(frame, text="Filtro Taglio Bassi (HPF Hz):").grid(row=row_idx, column=0, sticky="w", **pad)
             self.hpf_var = tk.IntVar(value=loaded_hpf)
             self.hpf_scale = ttk.Scale(frame, from_=0, to=300, variable=self.hpf_var, command=self._on_dsp_change, length=180)
@@ -1231,6 +1288,9 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 comp_ratio=3.0
             )
             messagebox.showinfo("Configurazione", "Tutte le impostazioni avanzate e i filtri sono stati salvati!")
+        
+        def _on_saturation_change(self,value):
+            self.anonymizer.saturation=float(value)
 
     root = tk.Tk()
     App(root)
