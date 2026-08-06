@@ -425,6 +425,7 @@ class VoiceAnonymizer:
         use_world = _PYWORLD_AVAILABLE and self.world_enabled and self._session_cfg.enabled
 
         if use_world:
+            # Pipeline avanzata con Vocoder WORLD
             self.board_on = Pedalboard([
                 HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
                 LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
@@ -448,17 +449,33 @@ class VoiceAnonymizer:
                 Gain(gain_db=self.gain_db),
             ])
         else:
+            # Pipeline standard Pedalboard (usata se WORLD è disattivato)
             self.board_on = Pedalboard([
-                PitchShift(semitones=self.semitones),
+                PitchShift(semitones=self.semitones),  # Ora incluso correttamente!
                 HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
                 LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
-                Chorus(rate_hz=0.5, depth=0.1, mix=self.chorus_mix),
-                Reverb(room_size=0.15, damping=0.7, wet_level=self.reverb_mix, dry_level=max(0.0, 1.0 - self.reverb_mix)),
+                Compressor(
+                    threshold_db=self.comp_threshold,
+                    ratio=self.comp_ratio,
+                    attack_ms=5.0,
+                    release_ms=80.0,
+                ),
+                Chorus(
+                    rate_hz=0.5,
+                    depth=0.1,
+                    mix=self.chorus_mix,
+                ),
+                Reverb(
+                    room_size=0.15,
+                    damping=0.7,
+                    wet_level=self.reverb_mix,
+                    dry_level=max(0.0, 1.0 - self.reverb_mix),
+                ),
                 Gain(gain_db=self.gain_db),
             ])
 
         self.board_off = Pedalboard([])
-
+        
     def set_world_enabled(self, value: bool):
         with self._lock:
             self.world_enabled = value
@@ -1199,7 +1216,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 comp_ratio=3.0
             )
             messagebox.showinfo("Configurazione", "Tutte le impostazioni avanzate e i filtri sono stati salvati!")
-            
+
     root = tk.Tk()
     App(root)
     root.mainloop()
