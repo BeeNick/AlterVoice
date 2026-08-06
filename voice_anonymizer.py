@@ -475,11 +475,15 @@ class VoiceAnonymizer:
             ])
 
         self.board_off = Pedalboard([])
-        
+
     def set_world_enabled(self, value: bool):
-        with self._lock:
-            self.world_enabled = value
-            self._session_cfg.enabled = value
+    with self._lock:
+        self.world_enabled = value
+        self._session_cfg.enabled = value
+
+        # quando passo a modalità legacy,
+        # sincronizzo il pitch corrente nel PitchShift
+        if not value:
             self._build_boards()
 
     def update_dsp_settings(self, hpf, lpf, comp_t, comp_r):
@@ -523,6 +527,8 @@ class VoiceAnonymizer:
             self.semitones = value
             if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
                 self._session_cfg.pitch_shift = value
+
+            # se WORLD è spento, aggiorna il PitchShift legacy
             else:
                 self._build_boards()
 
