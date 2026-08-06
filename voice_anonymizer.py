@@ -479,12 +479,6 @@ class VoiceAnonymizer:
     def set_world_enabled(self, value: bool):
         with self._lock:
             self.world_enabled = value
-            self._session_cfg.enabled = value
-
-            # quando passo a modalità legacy,
-            # sincronizzo il pitch corrente nel PitchShift
-            #if not value:
-            #  self._build_boards()
 
     def update_dsp_settings(self, hpf, lpf, comp_t, comp_r):
         with self._lock:
@@ -558,7 +552,7 @@ class VoiceAnonymizer:
         with self._lock:
             if not self.enabled:
                 return audio
-                
+
             if not self.world_enabled:
                 return audio
 
