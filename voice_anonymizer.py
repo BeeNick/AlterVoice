@@ -558,8 +558,13 @@ class VoiceAnonymizer:
         with self._lock:
             if not self.enabled:
                 return audio
-            if not (_PYWORLD_AVAILABLE and self._session_cfg.enabled):
+                
+            if not self.world_enabled:
                 return audio
+
+            if not _PYWORLD_AVAILABLE:
+                return audio
+
             cfg = self._session_cfg
         # Esecuzione fuori dal lock per non bloccare altri thread
         try:
