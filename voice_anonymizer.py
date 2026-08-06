@@ -384,29 +384,24 @@ def world_process(
 
 def apply_saturation(audio: np.ndarray, amount: float) -> np.ndarray:
     """
-    Saturazione morbida tipo tape/valvolare.
-
+    Saturazione morbida.
+    
     amount:
-      0.0 = nessuna saturazione
-      1.0 = forte saturazione
+        0 = bypass
+        1 = forte saturazione
     """
 
     if amount <= 0:
         return audio
 
-    drive = 1.0 + (amount * 8.0)
+    drive = 1.0 + amount * 5.0
 
     saturated = np.tanh(audio * drive)
 
-    # compensazione volume
-    saturated /= np.max(
-        np.abs(saturated)
-    ) + 1e-6
+    # compensazione semplice del gain
+    saturated /= np.tanh(drive)
 
-    return (
-        saturated *
-        np.max(np.abs(audio))
-    ).astype(np.float32)
+    return saturated.astype(np.float32)
 
 # =============================================================================
 # LOGICA DI ALTERAZIONE VOCALE (condivisa tra CLI e GUI)
@@ -468,6 +463,12 @@ class VoiceAnonymizer:
             self.board_on = Pedalboard([
                 HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
                 LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
+                PeakFilter(
+                    cutoff_frequency_hz=1500,
+                    gain_db=self.eq_gain_db,
+                   q=0.8,
+                ),
+
                 Compressor(
                     threshold_db=self.comp_threshold,
                     ratio=self.comp_ratio,
@@ -627,6 +628,15 @@ class VoiceAnonymizer:
             # fallback che rompere il buffer di sounddevice
             result = np.resize(result, len(audio))
         return result
+
+    def set_eq(self, value: float):
+        with self._lock:
+            self.eq_gain_db = value
+
+            for fx in self.board_on:
+                if isinstance(fx, PeakFilter):
+                    fx.gain_db = value
+                    return
 
 
 # =============================================================================
@@ -1283,10 +1293,16 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.anonymizer.update_dsp_settings(hpf_val, lpf_val, comp_t_val, 3.0)
 
         def _on_saturation_change(self,value):
-            self.anonymizer.saturation=float(value)
+            value = float(value)
+            self.saturation_label.config(text=f"{value:.2f}")
+            
+            with self.anonymizer._lock:
+                self.anonymizer.saturation = value
 
         def _on_eq_change(self,value):
-            self.anonymizer.eq_gain_db=float(value)
+            value=float(value)
+            self.eq_label.config(text=f"{value:.1f}")
+            self.anonymizer.set_eq(value)
 
         def _save_settings(self):
             formant_val = self.formant_var.get() if hasattr(self, "formant_var") else 1.10
