@@ -379,11 +379,13 @@ class VoiceAnonymizer:
         self,
         semitones: float = -4.0,
         chorus_mix: float = 0.2,
+        gain_db: float = 0.0,  # <-- NUOVO PARAMETRO
         enabled: bool = True,
         privacy_cfg: VoicePrivacyConfig | None = None,
     ):
-        self.semitones = semitones        # usato solo in modalita' legacy
+        self.semitones = semitones
         self.chorus_mix = chorus_mix
+        self.gain_db = gain_db  # <-- SALVIAMO IL VALORE
         self.enabled = enabled
         self._lock = threading.Lock()
 
@@ -423,7 +425,7 @@ class VoiceAnonymizer:
                     depth=0.12,
                     mix=min(self.chorus_mix, 0.15),
                 ),
-                Gain(gain_db=-1.0),
+                Gain(gain_db=self.gain_db),
             ])
         else:
             self.board_on = Pedalboard([
@@ -431,7 +433,7 @@ class VoiceAnonymizer:
                 HighpassFilter(cutoff_frequency_hz=140),
                 LowpassFilter(cutoff_frequency_hz=7000),
                 Chorus(rate_hz=0.7, depth=0.15, mix=self.chorus_mix),
-                Gain(gain_db=0.0),
+                Gain(gain_db=self.gain_db),
             ])
 
         self.board_off = Pedalboard([])
@@ -441,6 +443,15 @@ class VoiceAnonymizer:
             self.semitones = value
             if _PYWORLD_AVAILABLE and self._session_cfg.enabled:
                 self._session_cfg.pitch_shift = value
+            else:
+                self._build_boards()
+
+    def set_gain(self, value: float):
+        with self._lock:
+            self.gain_db = value
+            # Il Gain è sempre l'ultimo effetto (indice -1) nella board_on
+            if len(self.board_on) > 0 and hasattr(self.board_on[-1], 'gain_db'):
+                self.board_on[-1].gain_db = value
             else:
                 self._build_boards()
 
@@ -817,6 +828,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.anonymizer = VoiceAnonymizer(
                 semitones=default_semitones,
                 chorus_mix=default_chorus_mix,
+                gain_db=0.0,
                 enabled=True,
                 privacy_cfg=privacy_cfg,
             )
@@ -900,7 +912,19 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
                 self.formant_label = ttk.Label(frame, text="1.10", width=5)
                 self.formant_label.grid(row=3, column=2, sticky="w", **pad)
 
-            btn_row = 4
+            # --- Slider del Volume ---
+            ttk.Label(frame, text="Volume Output (dB):").grid(row=4, column=0, sticky="w", **pad)
+            self.gain_var = tk.DoubleVar(value=0.0)
+            self.gain_scale = ttk.Scale(
+                frame, from_=-12.0, to=12.0, variable=self.gain_var,
+                command=self._on_gain_change, length=220,
+            )
+            self.gain_scale.grid(row=4, column=1, sticky="we", **pad)
+            self.gain_label = ttk.Label(frame, text="0.0", width=5)
+            self.gain_label.grid(row=4, column=2, sticky="w", **pad)
+
+            btn_row = 5
+
             self.start_button = ttk.Button(frame, text="Avvia", command=self._toggle_stream)
             self.start_button.grid(row=btn_row, column=0, **pad)
 
@@ -1045,6 +1069,12 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             """Salva le stringhe selezionate su file JSON"""
             save_config(self.input_var.get(), self.output_var.get())
             messagebox.showinfo("Configurazione", "Configurazione salvata con successo!\nVerrà ricaricata al prossimo avvio.")
+
+        def _on_gain_change(self, value_str):
+            value = float(value_str)
+            if hasattr(self, "gain_label"):
+                self.gain_label.config(text=f"{value:.1f}")
+            self.anonymizer.set_gain(value)
 
     root = tk.Tk()
     App(root)
