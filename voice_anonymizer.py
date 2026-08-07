@@ -460,6 +460,69 @@ class VoiceAnonymizer:
 
         if use_world:
             # Pipeline avanzata con Vocoder WORLD
+            
+            self.board_pre_saturation = Pedalboard([
+                HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
+                LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
+                PeakFilter(
+                    cutoff_frequency_hz=1500,
+                    gain_db=self.eq_gain_db,
+                   q=0.8,
+                ),
+            ])
+
+            self.board_post_saturation = Pedalboard([
+                HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
+                LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
+                PeakFilter(
+                    cutoff_frequency_hz=1500,
+                    gain_db=self.eq_gain_db,
+                   q=0.8,
+                ),
+
+                Compressor(
+                    threshold_db=self.comp_threshold,
+                    ratio=self.comp_ratio,
+                    attack_ms=5.0,
+                    release_ms=80.0,
+                ),
+                Chorus(
+                    rate_hz=0.5,
+                    depth=0.1,
+                    mix=self.chorus_mix,
+                ),
+                Reverb(
+                    room_size=0.15,
+                    damping=0.7,
+                    wet_level=self.reverb_mix,
+                    dry_level=max(0.0, 1.0 - self.reverb_mix),
+                ),
+                Gain(gain_db=self.gain_db),
+            ])
+        else:
+            # Pipeline standard Pedalboard (usata se WORLD è disattivato)
+            self.board_on = Pedalboard([
+                Compressor(
+                    threshold_db=self.comp_threshold,
+                    ratio=self.comp_ratio,
+                    attack_ms=5.0,
+                    release_ms=80.0,
+                ),
+                Chorus(
+                    rate_hz=0.5,
+                    depth=0.1,
+                    mix=self.chorus_mix,
+                ),
+                Reverb(
+                    room_size=0.15,
+                    damping=0.7,
+                    wet_level=self.reverb_mix,
+                    dry_level=max(0.0, 1.0 - self.reverb_mix),
+                ),
+                Gain(gain_db=self.gain_db),
+            ])
+
+            
             self.board_on = Pedalboard([
                 HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
                 LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
@@ -778,10 +841,13 @@ class AudioEngine:
             mono = self.anonymizer.process_world(mono, self.samplerate)
 
             # 3. Stadio Pedalboard
-            board = self.anonymizer.current_board()
-            processed = board( mono.reshape(1,-1), self.samplerate, reset=False)
+            processed = self.anonymizer.board_pre_saturation(mono.reshape(1,-1), self.samplerate, reset=False)
             processed = processed.reshape(-1)
-            processed = apply_saturation( processed, self.anonymizer.saturation)
+
+            # Saturazione subito dopo compressore
+            processed = apply_saturation(processed, self.anonymizer.saturation)
+            processed = self.anonymizer.board_post_saturation(processed.reshape(1,-1), self.samplerate, reset=False)
+            processed = processed.reshape(-1)
 
             # Assicura lunghezza corretta (paranoia difensiva)
             if len(processed) < frames:
