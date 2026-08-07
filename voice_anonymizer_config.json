@@ -1,1 +1,16 @@
-{"input_device": "[21] Cuffia auricolare con microfono (Jabra EVOLVE LINK MS)  (Windows WASAPI)", "output_device": "[5] Cuffia (Synaptics Audio)  (MME)"}
+{
+    "input_device": "[1] Cuffia auricolare con microfono  (MME)",
+    "output_device": "[5] Auricolare e microtelefono (Jab  (MME)",
+    "semitones": -2.5,
+    "formant_scale": 1.097752808988764,
+    "chorus_mix": 0.06573033707865168,
+    "reverb_mix": 0.09550561797752809,
+    "gain_db": 6.0,
+    "world_enabled": true,
+    "hpf_cutoff": 60,
+    "lpf_cutoff": 7573,
+    "comp_threshold": -24.49438202247191,
+    "comp_ratio": 3.0,
+    "saturation": 0.23,
+    "eq_gain_db": 1.8876404494382015
+}
