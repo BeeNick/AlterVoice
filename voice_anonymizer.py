@@ -1071,7 +1071,7 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             # Slider Saturzione
             ttk.Label(frame, text="Saturazione:").grid(row=row_idx,column=0, sticky="w", **pad)
             self.saturation_var = tk.DoubleVar(value=loaded_saturation)
-            self.saturation_scale = ttk.Scale(frame, from_=0, to=1, variable=self.saturation_var, command=self._on_saturation_change, length=180 )
+            self.saturation_scale = ttk.Scale(frame, from_=0.0, to=1.0, variable=self.saturation_var, command=self._on_saturation_change, length=180 )
             self.saturation_scale.grid(row=row_idx, column=1,  sticky="we", **pad)
             self.saturation_label = ttk.Label(frame, text=f"{loaded_saturation:.2f}", width=5)
             self.saturation_label.grid(row=row_idx, column=2, sticky="w", **pad)
@@ -1293,11 +1293,13 @@ def run_gui(default_semitones: float = -4.0, default_chorus_mix: float = 0.2):
             self.anonymizer.update_dsp_settings(hpf_val, lpf_val, comp_t_val, 3.0)
 
         def _on_saturation_change(self,value):
-            value = float(value)
+            value = round(float(value), 3)
+
+            self.saturation_var.set(value)
             self.saturation_label.config(text=f"{value:.2f}")
-            
+
             with self.anonymizer._lock:
-                self.anonymizer.saturation = value
+               self.anonymizer.saturation = value
 
         def _on_eq_change(self,value):
             value=float(value)
