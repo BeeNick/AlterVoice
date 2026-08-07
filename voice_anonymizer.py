@@ -494,6 +494,9 @@ class VoiceAnonymizer:
                 ),
                 Gain(gain_db=self.gain_db),
             ])        
+
+            self.board_on = self.board_post_saturation
+
         else:
             # Pipeline standard Pedalboard (usata se WORLD è disattivato)
             self.board_on = Pedalboard([
@@ -527,6 +530,11 @@ class VoiceAnonymizer:
 
         self.board_off = Pedalboard([])
 
+    def all_boards(self):
+        if hasattr(self, "board_pre_saturation"):
+            return [self.board_pre_saturation, self.board_post_saturation]
+        return [self.board_on]
+
     def set_world_enabled(self, value: bool):
         with self._lock:
             self.world_enabled = value
@@ -538,43 +546,47 @@ class VoiceAnonymizer:
             self.comp_threshold = comp_t
             self.comp_ratio = comp_r
 
-            for fx in self.board_on:
-                if isinstance(fx, HighpassFilter):
-                    fx.cutoff_frequency_hz = hpf
+            for board in self.all_boards():
+                for fx in board:
+                    if isinstance(fx, HighpassFilter):
+                        fx.cutoff_frequency_hz = hpf
 
-                elif isinstance(fx, LowpassFilter):
-                    fx.cutoff_frequency_hz = lpf
+                    elif isinstance(fx, LowpassFilter):
+                        fx.cutoff_frequency_hz = lpf
 
-                elif isinstance(fx, Compressor):
-                    fx.threshold_db = comp_t
-                    fx.ratio = comp_r
+                    elif isinstance(fx, Compressor):
+                        fx.threshold_db = comp_t
+                        fx.ratio = comp_r
 
     def set_chorus(self, value: float):
         with self._lock:
             self.chorus_mix = value
-            for fx in self.board_on:
-                if isinstance(fx, Chorus):
-                    fx.mix = value
-                    return
+            for board in self.all_boards():
+                for fx in board:
+                    if isinstance(fx, Chorus):
+                        fx.mix = value
+                        return
             self._build_boards()
 
     def set_reverb(self, value: float):
         with self._lock:
             self.reverb_mix = value
-            for fx in self.board_on:
-                if isinstance(fx, Reverb):
-                    fx.wet_level = value
-                    fx.dry_level = max(0.0, 1.0 - value)
-                    return
+            for board in self.all_boards():
+                for fx in board:
+                    if isinstance(fx, Reverb):
+                        fx.wet_level = value
+                        fx.dry_level = max(0.0, 1.0 - value)
+                        return
             self._build_boards()
 
     def set_gain(self, value: float):
         with self._lock:
             self.gain_db = value
-            for fx in self.board_on:
-                if isinstance(fx, Gain):
-                    fx.gain_db = value
-                    return
+            for board in self.all_boards():
+                for fx in board:
+                    if isinstance(fx, Gain):
+                        fx.gain_db = value
+                        return
             self._build_boards()
 
     def set_semitones(self, value: float):
@@ -638,11 +650,11 @@ class VoiceAnonymizer:
     def set_eq(self, value: float):
         with self._lock:
             self.eq_gain_db = value
-
-            for fx in self.board_on:
-                if isinstance(fx, PeakFilter):
-                    fx.gain_db = value
-                    return
+            for board in self.all_boards():
+                for fx in board:
+                    if isinstance(fx, PeakFilter):
+                        fx.gain_db = value
+                        return
 
 
 # =============================================================================
