@@ -498,59 +498,7 @@ class VoiceAnonymizer:
                     dry_level=max(0.0, 1.0 - self.reverb_mix),
                 ),
                 Gain(gain_db=self.gain_db),
-            ])
-        else:
-            # Pipeline standard Pedalboard (usata se WORLD è disattivato)
-            self.board_on = Pedalboard([
-                Compressor(
-                    threshold_db=self.comp_threshold,
-                    ratio=self.comp_ratio,
-                    attack_ms=5.0,
-                    release_ms=80.0,
-                ),
-                Chorus(
-                    rate_hz=0.5,
-                    depth=0.1,
-                    mix=self.chorus_mix,
-                ),
-                Reverb(
-                    room_size=0.15,
-                    damping=0.7,
-                    wet_level=self.reverb_mix,
-                    dry_level=max(0.0, 1.0 - self.reverb_mix),
-                ),
-                Gain(gain_db=self.gain_db),
-            ])
-
-            
-            self.board_on = Pedalboard([
-                HighpassFilter(cutoff_frequency_hz=self.hpf_cutoff),
-                LowpassFilter(cutoff_frequency_hz=self.lpf_cutoff),
-                PeakFilter(
-                    cutoff_frequency_hz=1500,
-                    gain_db=self.eq_gain_db,
-                   q=0.8,
-                ),
-
-                Compressor(
-                    threshold_db=self.comp_threshold,
-                    ratio=self.comp_ratio,
-                    attack_ms=5.0,
-                    release_ms=80.0,
-                ),
-                Chorus(
-                    rate_hz=0.5,
-                    depth=0.1,
-                    mix=self.chorus_mix,
-                ),
-                Reverb(
-                    room_size=0.15,
-                    damping=0.7,
-                    wet_level=self.reverb_mix,
-                    dry_level=max(0.0, 1.0 - self.reverb_mix),
-                ),
-                Gain(gain_db=self.gain_db),
-            ])
+            ])        
         else:
             # Pipeline standard Pedalboard (usata se WORLD è disattivato)
             self.board_on = Pedalboard([
